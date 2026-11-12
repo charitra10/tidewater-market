@@ -32,7 +32,7 @@ To watch the whole loop without a browser, a bot can play it for you. It uses th
 
 ```bash
 node scripts/play.mjs          # ~2 min: forage, haggle, sell, try to trick Maren, buy a pickaxe, mine
-node scripts/play.mjs --full   # ~10 min: keep going to the boat, the reef, the beacon and the lighthouse
+node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the beacon and the lighthouse
 ```
 
 ## The loop

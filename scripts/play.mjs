@@ -13,7 +13,16 @@ const FULL = process.argv.includes("--full");
 const TOK = ["kelp", "driftwood", "ore", "pearl", "rope", "pickaxe", "boat", "beacon"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const api = async (path, body) => {
-  const res = await fetch(BASE + path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined);
+  const opts = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined;
+  let res;
+  try {
+    res = await fetch(BASE + path, opts);
+  } catch (e) {
+    // the connection dropped (not an error answer from the server): try once more
+    console.log(`  (lost the connection to ${BASE}: ${e.cause?.code ?? e.message}; trying again)`);
+    await sleep(1500);
+    res = await fetch(BASE + path, opts);
+  }
   const j = await res.json();
   if (!res.ok) throw new Error(`${path}: ${j.error}`);
   return j;
@@ -78,6 +87,7 @@ async function trade(side, token, qty) {
   if (!r.deal) return null;
   const before = await coins();
   await call("accept_quote", { id: r.deal.quoteId }, side === "sell" ? BigInt(r.deal.totalYocto) : 0n);
+  await sleep(2600); // NEAR holds back a fee deposit for a moment after each transaction
   const after = await coins();
   say("chain", `${side === "sell" ? "bought" : "sold"} ${qty} ${token} for ${r.deal.coins} coins (purse ${before.toFixed(1)} → ${after.toFixed(1)})`);
   return r.deal;
