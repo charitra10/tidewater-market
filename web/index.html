@@ -52,6 +52,15 @@
   #help { left: 280px; bottom: 16px; color: rgba(255, 255, 255, .8); font-size: 12.5px; text-shadow: 0 1px 3px rgba(0, 0, 0, .6); }
   kbd { background: rgba(255, 255, 255, .16); border-radius: 4px; padding: 1px 5px; font: inherit; }
   #ledger-btn { right: 14px; bottom: 14px; padding: 8px 12px; font-size: 13px; }
+  #ticker { top: 66px; left: 14px; max-width: min(460px, calc(100vw - 28px)); padding: 6px 12px 6px 9px; display: flex; align-items: center; gap: 7px; font-size: 13px; }
+  #ticker-icon svg { width: 18px; height: 18px; }
+  #ticker-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #ticker-when { flex: none; color: var(--ink-2); font-size: 12px; }
+  #ticker.turn #ticker-text, #ticker.turn #ticker-icon { animation: tick-in .35s ease-out; }
+  #ticker.new { animation: tick-new 2.4s ease-out; }
+  #ticker.new #ticker-text, #ticker.new #ticker-icon { animation: tick-in .35s ease-out; }
+  @keyframes tick-in { from { opacity: 0; transform: translateY(-5px); } }
+  @keyframes tick-new { 0%, 30% { background: #ffe7a6; box-shadow: 0 0 0 3px rgba(217, 164, 65, .55), var(--shadow); } }
   #toasts { position: fixed; left: 50%; top: 78px; transform: translateX(-50%); z-index: 20; display: grid; gap: 8px; justify-items: center; pointer-events: none; }
   .toast { background: rgba(38, 34, 30, .92); color: #fff; padding: 9px 16px; border-radius: 20px; font-weight: 600; animation: toast 3.4s forwards; max-width: 80vw; text-align: center; }
   .toast.bad { background: rgba(150, 44, 32, .95); }
@@ -105,6 +114,12 @@
   #shop footer { padding: 8px 14px 12px; font-size: 12.5px; color: var(--ink-2); border-top: 1px solid var(--line); }
   #shop footer .books { display: flex; gap: 12px; margin-bottom: 4px; color: var(--ink); }
   #news { margin: 0; padding: 0; list-style: none; max-height: 54px; overflow: hidden; }
+  .trend { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; vertical-align: -3px; font-size: 11.5px; font-weight: 700; font-style: normal; }
+  .item .trend svg { width: 56px; height: 18px; }
+  .trend path { fill: none; stroke: var(--ink-2); stroke-width: 1.4; stroke-linejoin: round; stroke-linecap: round; opacity: .75; }
+  .trend circle { fill: var(--ink-2); }
+  .trend.good circle { fill: var(--green); } .trend.bad circle { fill: var(--red); }
+  .trend i { font-style: normal; } .trend i.good { color: var(--green); } .trend i.bad { color: var(--red); }
 
   /* ledger (the chain, for the curious) */
   #ledger { position: fixed; z-index: 12; right: 12px; bottom: 58px; width: min(400px, calc(100vw - 24px)); max-height: 60vh; overflow: auto; padding: 14px; font-size: 13px; }
@@ -127,10 +142,16 @@
   #keepers { margin: 10px auto 0; border-collapse: collapse; font-size: 13.5px; }
   #keepers td { padding: 2px 10px; text-align: left; }
   #keepers tr.me td { font-weight: 700; color: var(--red); }
+  #board { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--line); font-size: 13px; color: var(--ink-2); }
+  #board h3 { font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--ink); margin: 10px 0 4px; font-family: inherit; }
+  #title-keepers { margin: 0 auto; border-collapse: collapse; }
+  #title-keepers td { padding: 1px 8px; text-align: left; }
+  #title-keepers tr.me td { font-weight: 700; color: var(--red); }
 
   @media (max-width: 760px) {
     #goal { width: 190px; font-size: 12px; } #help { display: none; }
     #inv { top: 66px; left: 14px; right: auto; }
+    #ticker { top: 122px; }
     .slot { width: 36px; height: 36px; } .slot svg { width: 24px; height: 24px; }
   }
 </style>
@@ -149,6 +170,7 @@
 </div>
 <div id="help" class="hud" hidden><kbd>WASD</kbd> or click to walk · <kbd>E</kbd> to use what's nearby</div>
 <button id="ledger-btn" class="hud card" hidden title="See what is happening on the NEAR blockchain">⛓ Ledger</button>
+<div id="ticker" class="hud card" hidden title="What other players have been doing, from the contract's trade log"><span id="ticker-icon"></span><span id="ticker-text"></span><span id="ticker-when"></span></div>
 <div id="toasts"></div>
 
 <aside id="shop" class="card" hidden>
@@ -208,6 +230,11 @@
     <p>Comb the shore, haggle with Maren, and work your way up to the light.</p>
     <button class="btn" id="start">Step ashore</button>
     <small id="start-note">You'll play as a guest. Nothing to install, nothing to sign.</small>
+    <div id="board" hidden>
+      <div id="stats"></div>
+      <h3>Keepers of the light</h3>
+      <table id="title-keepers"></table>
+    </div>
   </div>
 </div>
 

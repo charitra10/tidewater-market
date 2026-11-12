@@ -90,6 +90,123 @@ function float(text, icon, opts = {}) {
   S.floats.push({ text, icon, x: opts.x ?? S.player.x, y: opts.y ?? S.player.y - 70, life: 1.9, total: 1.9, bad: opts.bad, wait: opts.wait ?? 0 });
 }
 
+// ---------- other players (everything here comes from the contract's logs) ----------
+/// A short name for an account: guests are "Guest 7f1f", anyone else keeps their name.
+const mine = (account) => account === (me ?? save?.accountId); // (on the title screen, `me` is not set yet)
+function who(account) {
+  if (mine(account)) return "You";
+  const g = account.match(/^g([0-9a-f]{4})[0-9a-f]*\./);
+  return g ? `Guest ${g[1]}` : account.split(".")[0];
+}
+const MANY = { kelp: "kelp", driftwood: "driftwood", ore: "ore", pearl: "pearls", rope: "rope", pickaxe: "pickaxes", boat: "boats", beacon: "beacon lenses" };
+const lot = (token, n) => (n === 1 ? (["kelp", "driftwood", "ore", "rope"].includes(token) ? "1 " : "a ") + NAMES[token].toLowerCase() : `${n} ${MANY[token]}`);
+function ago(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+function eventText(e) {
+  const name = who(e.player);
+  if (e.kind === "trade") return `${name} ${e.did} ${lot(e.token, e.qty)} ${e.did === "sold" ? "to" : "from"} Maren for ${e.coins} coins`;
+  if (e.kind === "refused") {
+    // a price outside her floors and ceilings only comes from someone trying to trick her
+    if (/floor|ceiling/.test(e.reason)) return `${name} tried to talk Maren into a silly deal. The ledger refused it.`;
+    return `The ledger stopped a deal with ${name}: ${e.reason.replace(/_/g, " ")}`;
+  }
+  return `${name} relit the lighthouse!`;
+}
+
+// The ticker under the purse: the latest few things other players did, one at a
+// time. Something new jumps to the front. Your own deals are left out (you see those anyway).
+const ticker = { items: [], i: 0, newest: 0, until: 0 };
+function updateTicker() {
+  const items = (S.market?.feed ?? []).filter((e) => e.player !== me).slice(0, 5);
+  $("ticker").hidden = !started || items.length === 0;
+  if (!items.length) return;
+  const fresh = items[0].at > ticker.newest;
+  const first = ticker.newest === 0;
+  ticker.items = items;
+  if (ticker.i >= items.length) ticker.i = 0;
+  if (fresh) {
+    ticker.newest = items[0].at;
+    ticker.i = 0;
+    showTick(!first);
+  }
+}
+function showTick(isNew) {
+  const e = ticker.items[ticker.i];
+  $("ticker-icon").innerHTML = ICONS[e.kind === "keeper" ? "beacon" : e.token] ?? "";
+  $("ticker-text").textContent = eventText(e);
+  $("ticker-text").title = e.player;
+  $("ticker-when").textContent = ago(e.at);
+  const el = $("ticker");
+  el.classList.remove("new", "turn");
+  void el.offsetWidth;
+  el.classList.add(isNew ? "new" : "turn");
+  ticker.until = Date.now() + (isNew ? 10_000 : 6000);
+}
+setInterval(() => {
+  if (!ticker.items.length || $("ticker").hidden) return;
+  if (Date.now() >= ticker.until && ticker.items.length > 1) {
+    ticker.i = (ticker.i + 1) % ticker.items.length;
+    showTick(false);
+  } else $("ticker-when").textContent = ago(ticker.items[ticker.i].at);
+}, 1000);
+
+const clock = (ms) => `${Math.floor(ms / 60000)}m ${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}s`;
+const keeperRows = (list) =>
+  list.map((x, i) => `<tr class="${mine(x.player) ? "me" : ""}"><td>${i + 1}.</td><td title="${x.player}">${who(x.player)}</td><td>${clock(x.took_ms)}</td><td>${x.trades} deals</td></tr>`).join("");
+
+/// The title screen: how busy the market is and who has relit the lighthouse.
+function renderBoard(m) {
+  $("stats").textContent = `${m.players} ${m.players === 1 ? "person has" : "people have"} come ashore · ${m.deals} ${m.deals === 1 ? "deal" : "deals"} struck with Maren`;
+  $("title-keepers").innerHTML = m.keepers.length ? keeperRows(m.keepers) : `<tr><td>Nobody has relit it yet. It could be you.</td></tr>`;
+  $("board").hidden = false;
+}
+
+// A little line of how a price has moved lately (the server keeps the last few minutes).
+function trend(token, upIsGood) {
+  const h = S.market?.history;
+  const line = h?.prices?.[token];
+  if (!line || line.length < 2) return "";
+  const vals = line.filter((v) => v != null);
+  if (!vals.length) return "";
+  let lo = Math.min(...vals);
+  let hi = Math.max(...vals);
+  const span = Math.max(1, hi * 0.3); // a small wobble should look like a wobble, not a cliff
+  if (hi - lo < span) {
+    const mid = (hi + lo) / 2;
+    lo = mid - span / 2;
+    hi = mid + span / 2;
+  }
+  const w = 56;
+  const ht = 18;
+  const x = (i) => ((i / (line.length - 1)) * (w - 4) + 2).toFixed(1);
+  const y = (v) => (ht - 2 - ((v - lo) / (hi - lo)) * (ht - 4)).toFixed(1);
+  let d = "";
+  let pen = false;
+  line.forEach((v, i) => {
+    if (v == null) return (pen = false); // sold out: a gap in the line
+    d += `${pen ? "L" : "M"}${x(i)} ${y(v)}`;
+    pen = true;
+  });
+  // net change over the last two minutes
+  const now = line[line.length - 1];
+  const from = h.at.findIndex((t) => t >= h.at[h.at.length - 1] - 120_000);
+  const then = line[from];
+  let arrow = "";
+  let mood = "flat";
+  if (now != null && then != null && now !== then) {
+    mood = now > then === upIsGood ? "good" : "bad";
+    const delta = Math.abs(now - then);
+    arrow = `<i class="${mood}" title="${then} coins two minutes ago">${now > then ? "▲" : "▼"}${delta >= 10 ? Math.round(delta) : +delta.toFixed(1)}</i>`;
+  }
+  const dot = now != null ? `<circle cx="${x(line.length - 1)}" cy="${y(now)}" r="2"/>` : "";
+  return `<span class="trend ${mood}" title="Price over the last few minutes"><svg viewBox="0 0 ${w} ${ht}" width="${w}" height="${ht}"><path d="${d}"/>${dot}</svg>${arrow}</span>`;
+}
+
 // ---------- chain ----------
 let lastTxAt = -1e9;
 async function call(method, args = {}, deposit = 0n, label = method) {
@@ -141,6 +258,7 @@ function refresh() {
       else setTimeout(refresh, settling ? 2600 : 1500); // (a brand-new account can also take a moment to show up)
       S.market = market;
       renderHud();
+      updateTicker();
       if (S.shopOpen) renderShop();
     } catch (e) {
       console.warn("refresh:", e.message);
@@ -270,12 +388,8 @@ async function lighthouse() {
     await refresh();
     await sleep(2600);
     const keepers = await near.view(cfg.contract, "get_keepers").catch(() => []);
-    const time = (ms) => `${Math.floor(ms / 60000)}m ${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}s`;
-    $("win-text").textContent = `You relit the lighthouse in ${time(k.took_ms)}, with ${k.forages} trips out and ${k.trades} deals struck. Maren says she never doubted you.`;
-    $("keepers").innerHTML = keepers
-      .slice(0, 5)
-      .map((x, i) => `<tr class="${x.player === me ? "me" : ""}"><td>${i + 1}.</td><td>${x.player === me ? "You" : x.player.split(".")[0]}</td><td>${time(x.took_ms)}</td><td>${x.trades} deals</td></tr>`)
-      .join("");
+    $("win-text").textContent = `You relit the lighthouse in ${clock(k.took_ms)}, with ${k.forages} trips out and ${k.trades} deals struck. Maren says she never doubted you.`;
+    $("keepers").innerHTML = keeperRows(keepers.slice(0, 5));
     $("win").hidden = false;
   } catch (e) {
     toast(e.message, true);
@@ -355,14 +469,14 @@ function renderShop() {
         sub = `Sold out. To make one she needs ${needs}`;
       } else sub = `${w.stock} on the shelf. ${sub}`;
       if (mine > 0) sub += ` <b>You have ${mine}.</b>`;
-      html += `<div class="item">${ICONS[w.token]}<div><div class="name">${NAMES[w.token]}</div><div class="sub">${sub}</div></div>
+      html += `<div class="item">${ICONS[w.token]}<div><div class="name">${NAMES[w.token]}${trend(w.token, false)}</div><div class="sub">${sub}</div></div>
         <div class="buy">${w.price ? `<span class="p">${w.price}</span><button class="btn small" data-open="sell" data-token="${w.token}" data-qty="1">Haggle</button>` : ""}</div></div>`;
     }
   } else {
     for (const b of m.board.buys) {
       const have = pv.items[idx(b.token)];
       const qty = Math.max(1, Math.min(have, sellQty[b.token] ?? have));
-      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${b.price} each.</div></div>
+      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${b.price} each.</div></div>
         <div class="buy">${
           have > 0
             ? `<span class="qty"><button data-qty-token="${b.token}" data-d="-1">−</button>${qty}<button data-qty-token="${b.token}" data-d="1">+</button></span><button class="btn small" data-open="buy" data-token="${b.token}" data-qty="${qty}">Sell</button>`
@@ -680,6 +794,12 @@ async function boot() {
       $("start").textContent = "Walk back into the village";
       $("start-note").textContent = "Welcome back. Your things are where you left them.";
     }
+    api("/api/market")
+      .then((m) => {
+        S.market ??= m;
+        renderBoard(m);
+      })
+      .catch(() => {}); // the board is a nicety; the game starts without it
   } catch (e) {
     $("start").disabled = true;
     $("start-note").textContent = "The game server is not answering. Start it with: node server/server.js";
@@ -719,6 +839,7 @@ $("start").onclick = async () => {
     S.nightAmount = S.night ? 0.7 : 0;
     $("title").hidden = true;
     started = true;
+    updateTicker();
     if (pv.forages === 0) setTimeout(() => toast("Walk down to the tide pools on the shore and press E."), 900);
     setInterval(() => {
       if (!busy && !document.hidden) refresh();

@@ -15,7 +15,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
-import { TOKENS, RAW, WARES, TARGET, RECIPES, priceBoard, planWork, openHaggle, haggle, readIntent, MOODS } from "./merchant.js";
+import { TOKENS, RAW, WARES, TARGET, RECIPES, priceBoard, unitBid, planWork, openHaggle, haggle, readIntent, MOODS } from "./merchant.js";
 import { say, writtenLine, initVoice, lot } from "./voice.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -58,10 +58,74 @@ const byToken = (list, f = (x) => x) => Object.fromEntries(TOKENS.map((t, i) => 
 let cache = { at: 0, market: null };
 let policy = null;
 
+// What other players have been doing, straight from the contract's logs. Each
+// log is fetched again only when its counter in get_market moves, so a quiet
+// market costs no extra RPC calls.
+const logs = { trades: [], blocked: [], keepers: [], seen: { trades: -1, blocked: -1, beacons: "" } };
+async function refreshLogs(mv) {
+  const jobs = [];
+  if (mv.trade_count !== logs.seen.trades) {
+    jobs.push(near.view(CONTRACT, "get_trades", { limit: 20 }).then((t) => ((logs.trades = t), (logs.seen.trades = mv.trade_count))));
+  }
+  if (mv.blocked_count !== logs.seen.blocked) {
+    jobs.push(near.view(CONTRACT, "get_blocked", { limit: 5 }).then((b) => ((logs.blocked = b), (logs.seen.blocked = mv.blocked_count))));
+  }
+  // lighting the lighthouse burns a beacon lens, so the beacon supply moving is the cue
+  const beacons = String(mv.supply[TOKENS.indexOf("beacon")]);
+  if (beacons !== logs.seen.beacons) {
+    jobs.push(near.view(CONTRACT, "get_keepers").then((k) => ((logs.keepers = k), (logs.seen.beacons = beacons))));
+  }
+  await Promise.all(jobs).catch((e) => console.warn("logs:", e.message)); // stale logs are fine; try again next time
+}
+
+/// The newest things that happened in the market, newest first.
+function feed() {
+  const items = [
+    ...logs.trades.map((t) => ({
+      kind: "trade",
+      player: t.player,
+      did: t.side === "Sell" ? "bought" : "sold", // the contract names sides from Maren's side of the counter
+      token: t.token_id,
+      qty: t.qty,
+      coins: Math.round(yoctoToCoins(t.total)),
+      at: t.timestamp_ms,
+    })),
+    ...logs.blocked.map((b) => ({ kind: "refused", player: b.player, token: b.token_id, reason: b.reason, at: b.timestamp_ms })),
+    ...logs.keepers.map((k) => ({ kind: "keeper", player: k.player, at: k.lit_ms })),
+  ];
+  return items.sort((a, b) => b.at - a.at).slice(0, 20);
+}
+
+// A short memory of prices, so players can see them move. A sample is taken
+// on each market refresh where a price changed, and every SAMPLE_MS while
+// nothing does. Her bids for raw goods keep one decimal: kelp is worth only a
+// few coins, and whole coins would hide most of its moves.
+const SAMPLE_MS = 6000;
+const HISTORY = 60;
+const history = { at: [], prices: Object.fromEntries([...WARES, ...RAW].map((t) => [t, []])) };
+function remember(market) {
+  const now = Date.now();
+  const board = priceBoard(market);
+  const prices = {
+    ...Object.fromEntries(board.sells.map((r) => [r.token, r.price])),
+    ...Object.fromEntries(RAW.map((t) => [t, Math.round(unitBid(market, t) * 10) / 10])),
+  };
+  const last = history.at.length - 1;
+  const changed = last < 0 || Object.entries(prices).some(([t, p]) => history.prices[t][last] !== p);
+  if (!changed && now - history.at[last] < SAMPLE_MS) return;
+  history.at.push(now);
+  for (const [t, p] of Object.entries(prices)) history.prices[t].push(p);
+  if (history.at.length > HISTORY) {
+    history.at.shift();
+    for (const line of Object.values(history.prices)) line.shift();
+  }
+}
+
 async function getMarket(fresh = false) {
   if (cache.market && Date.now() - cache.at < (fresh ? 1000 : 3000)) return cache.market;
   const [mv, pol] = await Promise.all([near.view(CONTRACT, "get_market"), policy ?? near.view(CONTRACT, "get_policy")]);
   policy = pol;
+  await refreshLogs(mv);
   const market = {
     stock: byToken(mv.stock),
     avgCost: byToken(mv.avg_cost, yoctoToCoins),
@@ -76,6 +140,7 @@ async function getMarket(fresh = false) {
     blockedCount: mv.blocked_count,
     playerCount: mv.player_count,
   };
+  remember(market);
   cache = { at: Date.now(), market };
   return market;
 }
@@ -324,6 +389,11 @@ async function route(req, res) {
         mood: MOODS[(player && people.get(player)?.mood ? people.get(player).mood : 0) + 2],
         recipes: RECIPES,
         news,
+        feed: feed(),
+        keepers: logs.keepers.slice(0, 5),
+        history,
+        players: market.playerCount,
+        deals: market.tradeCount,
       });
     }
     if (url.pathname === "/api/guest" && req.method === "POST") {

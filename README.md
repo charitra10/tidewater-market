@@ -61,7 +61,7 @@ node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the b
 
 - **Coins are testnet NEAR.** 1 coin = 0.001 NEAR. When Maren buys your kelp, the contract transfers NEAR from her treasury to your account. When you buy a pickaxe, your NEAR goes into her treasury.
 - **Her prices come from her books.** Asking price rises as her shelf empties and never drops below what the item cost her plus a margin. Her bids fall as she fills up and when her treasury runs thin. The contract keeps her average cost per item and her running profit ([`get_market`](contract/src/lib.rs)).
-- **Players share one market.** If someone floods her with kelp, kelp is worth less for everyone until her workshop and the mainland boat clear it.
+- **Players share one market.** If someone floods her with kelp, kelp is worth less for everyone until her workshop and the mainland boat clear it. You can watch it happen: a ticker under your purse shows what other players just bought, sold or tried on Maren (read from the contract's trade log, nothing made up), and every item at the stall has a small line of how its price moved over the last few minutes. The title screen shows the keepers' board.
 - **She runs her business between customers.** A workshop loop crafts what is missing and ships surplus raw goods to "the mainland" at fixed export prices. That export fund is filled by the contract owner and is the one place new NEAR enters the game.
 - **Items are yours.** They are multi-token balances in the contract (NEP-245 core views, `mt_transfer` and events). You can give them to another player.
 
@@ -96,7 +96,7 @@ Her lines are written sentences picked at random ([`server/voice.js`](server/voi
 | Path | What |
 |---|---|
 | `contract/` | The market contract (Rust, near-sdk): items, energy, foraging, quotes, guard rails, crafting, exports, the keepers' board. Prebuilt wasm in `contract/res/`. |
-| `server/server.js` | Runs Maren (haggling, posting her quotes with her key, the workshop), creates guest accounts, serves the game. |
+| `server/server.js` | Runs Maren (haggling, posting her quotes with her key, the workshop), creates guest accounts, serves the game. Passes on the contract's trade log and keepers' board, and remembers recent prices for the price lines. |
 | `server/merchant.js` | Her pricing and bargaining, as pure functions. |
 | `web/` | The game: `game.js` (logic), `world.js` (the village, drawn in code), `near-lite.js` (transaction signing in ~350 lines, shared with the server and the bot). |
 | `scripts/` | `bootstrap.sh` (set up your own market), `play.mjs` (the bot), `test.sh`, `build.sh`. |
@@ -128,6 +128,7 @@ Main contract methods:
 
 - **Testnet only.** Coins are testnet NEAR and worth nothing.
 - **The server must be running.** Maren's bargaining and her key live in `server/server.js`. The contract keeps working without it, but nobody answers at the stall.
+- **Price history lives in the server's memory.** The price lines show the last 60 samples the server took (one per price change, or every 6 seconds while prices hold, so a few minutes of play); restarting the server starts them fresh. The trade ticker and the keepers' board come from the contract and survive restarts.
 - **Guest accounts are sponsored.** The server pays 0.13 testnet NEAR per new guest and limits how many it creates per hour. A guest's key lives in that browser's storage; clearing it loses the account. There is no wallet or social login yet.
 - **The haggling endpoint does not check who is asking.** Someone could open a haggle in another player's name. They could not take the deal: only the named player's key can accept a quote.
 - **Foraging randomness** comes from the block's random seed. That is fine for kelp, not for anything valuable.
