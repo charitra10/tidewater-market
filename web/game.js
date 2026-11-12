@@ -502,7 +502,18 @@ canvas.addEventListener("pointerdown", (e) => {
   if (!hit && x > 350 && x < 424 && y > 6 && y < 156) hit = HOTSPOTS.find((h) => h.id === "lighthouse");
   if (!hit && x < 236 && y > 400 && y < 620) hit = HOTSPOTS.find((h) => h.id === "reef");
   if (!hit && x > 940 && y < 250) hit = HOTSPOTS.find((h) => h.id === "cliffs");
-  target = hit ? { x: hit.x, y: hit.y, then: hit.id, stuck: 0 } : { x, y, stuck: 0 };
+  if (hit) target = { x: hit.x, y: hit.y, then: hit.id };
+  else {
+    // a click on water or rock means "as close as I can get": step back towards the player
+    let tx = x;
+    let ty = y;
+    const d = Math.hypot(S.player.x - x, S.player.y - y) || 1;
+    for (let i = 0; i < 80 && !walkable(tx, ty); i++) {
+      tx += ((S.player.x - x) / d) * 8;
+      ty += ((S.player.y - y) / d) * 8;
+    }
+    if (walkable(tx, ty)) target = { x: tx, y: ty };
+  }
 });
 
 $("shop-close").onclick = closeShop;
@@ -573,9 +584,14 @@ function frame(now) {
     let dy = (keys.has("s") || keys.has("arrowdown") ? 1 : 0) - (keys.has("w") || keys.has("arrowup") ? 1 : 0);
     if (dx || dy) target = null;
     else if (target) {
-      dx = target.x - p.x;
-      dy = target.y - p.y;
-      if (Math.hypot(dx, dy) < 7) {
+      // the pier has one way on and off: go by its landward end first
+      const onPier = (q) => q.x < 505 && q.y > 540 && q.y < 580;
+      if (target.via === undefined) target.via = onPier(target) !== onPier(p) ? { x: 522, y: 558 } : null;
+      if (target.via && Math.hypot(p.x - target.via.x, p.y - target.via.y) < 8) target.via = null;
+      const stop = target.via ?? target;
+      dx = stop.x - p.x;
+      dy = stop.y - p.y;
+      if (stop === target && Math.hypot(dx, dy) < 7) {
         const then = target.then;
         target = null;
         dx = dy = 0;
@@ -585,17 +601,29 @@ function frame(now) {
     const len = Math.hypot(dx, dy);
     p.moving = len > 0;
     if (len > 0) {
-      const sx = (dx / len) * SPEED * dt;
-      const sy = (dy / len) * SPEED * dt;
-      const ox = p.x;
-      const oy = p.y;
-      if (walkable(p.x + sx, p.y)) p.x += sx;
-      if (walkable(p.x, p.y + sy)) p.y += sy;
+      // Head for the goal; if the way is blocked (water, cliffs, the stall), try
+      // steering a little to either side, so the player slides around the coast.
+      const step = SPEED * dt;
+      for (const deg of [0, 25, -25, 50, -50, 75, -75, 90, -90]) {
+        const a = (deg * Math.PI) / 180;
+        const vx = (dx / len) * Math.cos(a) - (dy / len) * Math.sin(a);
+        const vy = (dx / len) * Math.sin(a) + (dy / len) * Math.cos(a);
+        if (walkable(p.x + vx * step, p.y + vy * step)) {
+          p.x += vx * step;
+          p.y += vy * step;
+          break;
+        }
+      }
       if (Math.abs(dx) > 0.5) p.face = dx > 0 ? 1 : -1;
       if (target) {
-        // give up on a click the player cannot reach
-        target.stuck = Math.hypot(p.x - ox, p.y - oy) < SPEED * dt * 0.3 ? target.stuck + dt : 0;
-        if (target.stuck > 0.5) target = null;
+        // give up on a click the player is no longer getting closer to
+        const stop = target.via ?? target;
+        const d = Math.hypot(stop.x - p.x, stop.y - p.y);
+        if (target.bestFor !== stop || d < target.best - 2) {
+          target.best = d;
+          target.bestFor = stop;
+          target.bestAt = now;
+        } else if (now - target.bestAt > 1200) target = null;
       }
     }
   } else p.moving = false;
@@ -624,7 +652,7 @@ function frame(now) {
     }
   }
 
-  S.nightAmount += ((S.night ? 0.82 : 0) - S.nightAmount) * Math.min(1, dt * 0.9);
+  S.nightAmount += ((S.night ? 0.7 : 0) - S.nightAmount) * Math.min(1, dt * 0.9);
   for (const f of S.floats) {
     if (f.wait > 0) f.wait -= dt;
     else f.life -= dt;
@@ -688,7 +716,7 @@ $("start").onclick = async () => {
     }
     buildHud();
     await refresh();
-    S.nightAmount = S.night ? 0.82 : 0;
+    S.nightAmount = S.night ? 0.7 : 0;
     $("title").hidden = true;
     started = true;
     if (pv.forages === 0) setTimeout(() => toast("Walk down to the tide pools on the shore and press E."), 900);

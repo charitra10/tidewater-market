@@ -6,6 +6,8 @@ The lighthouse in Tidewater has been dark for years. Maren, who keeps the only s
 
 Maren is not a menu. She is a separate NEAR account with a real treasury. She pays you in NEAR for what you bring, turns it into tools in her workshop, and sells the tools back at prices she sets from her own stock, her own costs and how much coin she has left. Nobody patches the prices: they move because of what players do.
 
+![Haggling with Maren at her stall](docs/stall.jpg)
+
 Built at **NEAR Hackathon 2026** for the **Games With Real Economies** track (also fits **Agent Economy**). Runs on NEAR **testnet**.
 
 > **Other submission by the same author:** [Agent Leash](https://github.com/charitra10/agent-leash), a spending-policy wallet for AI agents. The two projects are independent: they share no code and no contract.
@@ -30,7 +32,7 @@ To watch the whole loop without a browser, a bot can play it for you. It uses th
 
 ```bash
 node scripts/play.mjs          # ~2 min: forage, haggle, sell, try to trick Maren, buy a pickaxe, mine
-node scripts/play.mjs --full   # ~15 min: keep going to the boat, the reef, the beacon and the lighthouse
+node scripts/play.mjs --full   # ~10 min: keep going to the boat, the reef, the beacon and the lighthouse
 ```
 
 ## The loop
@@ -52,6 +54,8 @@ node scripts/play.mjs --full   # ~15 min: keep going to the boat, the reef, the 
 2. **Sell.** Maren buys kelp, driftwood, ore and pearls. The more of something she already holds, the less she pays. If she needs it to build something she has run out of, she pays more.
 3. **Buy.** She sells pickaxes, a boat and the beacon lens, but only if she has them. Everything on her shelf is crafted from what players sold her: 3 kelp make a rope; 2 driftwood and a rope make a pickaxe; a boat takes driftwood, rope and ore; the beacon takes pearls, ore and rope. If the boat is sold out, the stall shows what she is missing, and bringing it to her is how the boat gets built.
 4. **Light the lighthouse** with the beacon lens. Your time goes on the keepers' board.
+
+![The lighthouse, relit](docs/lighthouse.jpg)
 
 ## Why the economy is real
 
