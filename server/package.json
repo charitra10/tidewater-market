@@ -1,0 +1,13 @@
+{
+  "name": "tidewater-market-server",
+  "version": "0.1.0",
+  "description": "Maren the merchant NPC, the guest desk and the game server for Tidewater Market",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": { "node": ">=20.12" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}
