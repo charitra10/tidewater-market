@@ -1,0 +1,8 @@
+# Build output
+contract/target/
+node_modules/
+# Secrets: never commit keys
+.env
+*.key
+.near-credentials/
+bootstrap.log
