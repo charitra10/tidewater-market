@@ -307,3 +307,68 @@ export function readIntent(text) {
   if (/\b(please|friend|kind|lovely|beautiful|best|finest|favourite|favorite|generous|wonderful|love|pretty|thank)\b/.test(t)) return { type: "charm" };
   return { type: "chat" };
 }
+
+// ---------------------------------------------------------------------------
+// Silas, the pearl and ore dealer: he only buys, and ships what he buys to his
+// buyers in the city. His own treasury, his own guard rails on-chain.
+// ---------------------------------------------------------------------------
+
+export const DEALER_TOKENS = ["ore", "pearl"];
+/// How much of each he likes in his hold before he ships it off.
+export const DEALER_HOLD = { ore: 4, pearl: 3 };
+/// Treasury (in coins) at which he feels flush.
+export const DEALER_COMFORTABLE = 500;
+
+/// `dealer`: { stock, treasury, ceiling, cityPrice (coins), boughtInWindow?,
+///             windowLimit?, tide?, storm? }
+/// His offer for ONE unit when his hold has `stock` of it: a cut under what the
+/// city pays him, swinging harder with his hold than Maren's offers do with her
+/// shelves. Nothing at all in a storm: his boat is battened down.
+export function dealerBid(dealer, token, stock = dealer.stock[token]) {
+  const city = dealer.cityPrice[token] ?? 0;
+  if (!city || dealer.storm?.active) return 0;
+  const appetite = clamp(1.05 - (0.5 * stock) / DEALER_HOLD[token], 0.3, 1.05);
+  const cash = clamp(dealer.treasury / DEALER_COMFORTABLE, 0.3, 1);
+  const price = city * 0.78 * appetite * cash * tideBidFactor(token, dealer.tide);
+  return Math.min(price, city * 0.95, dealer.ceiling[token] ?? Infinity);
+}
+
+/// His price board: what he pays for one of each, now.
+export function dealerBoard(dealer) {
+  return DEALER_TOKENS.map((token) => ({ token, stock: dealer.stock[token], price: Math.round(dealerBid(dealer, token)) }));
+}
+
+/// Start bargaining with Silas over a lot he would buy. He gives less ground
+/// than Maren (6-12 %) and loses patience sooner. Same session shape, so
+/// `haggle` plays it out.
+export function openDealerHaggle(dealer, { token, qty, trades = 0, mood = 0 }, rng = Math.random) {
+  let list = 0;
+  for (let i = 0; i < qty; i++) list += dealerBid(dealer, token, dealer.stock[token] + i);
+  list = Math.round(list);
+  let give = 0.06 + rng() * 0.06;
+  if (trades >= 5) give += 0.01;
+  give += 0.01 * mood;
+  const budget = (dealer.windowLimit ?? Infinity) - (dealer.boughtInWindow ?? 0);
+  const hardCeil = Math.floor(Math.min((dealer.ceiling[token] ?? Infinity) * qty, dealer.treasury, budget));
+  let limit = Math.min(hardCeil, Math.round(list * (1 + give)));
+  limit = Math.max(limit, Math.min(list, hardCeil));
+  const counter = Math.min(list, limit);
+  return { side: "buy", token, qty, list: counter, counter, limit, round: 0, patience: 3 + (mood > 0 ? 1 : 0), mood, bluffUsed: false, charmUsed: false, final: false, over: false };
+}
+
+/// What he should ship to the city now: a full hold of each, if the mainland
+/// can pay and the sea lets him sail. Returns [{ token, qty, pay }].
+export function shipPlan(dealer, mainland) {
+  if (dealer.storm?.active) return [];
+  const jobs = [];
+  let fund = mainland;
+  for (const token of DEALER_TOKENS) {
+    const qty = dealer.stock[token];
+    const pay = qty * (dealer.cityPrice[token] ?? 0);
+    if (qty >= DEALER_HOLD[token] && pay > 0 && pay <= fund) {
+      jobs.push({ token, qty, pay });
+      fund -= pay;
+    }
+  }
+  return jobs;
+}
