@@ -34,7 +34,7 @@ NET="network-config testnet"
 SIGN="$NET sign-with-legacy-keychain send"
 
 # Asks the chain (read-only) whether the market's state is the current layout
-# (get_market reports bid_count: orders, offers and auctions), and whether
+# (get_market reports shop_count: player shops and their clerk), and whether
 # Maren's and Silas's current keys may call the newest of their methods
 # (answer_offer). The keys go in through the environment, never the command line.
 STATE=$(MERCHANT_KEY="$(get MERCHANT_KEY)" DEALER_KEY="$(get DEALER_KEY || true)" node --input-type=module -e '
@@ -52,7 +52,7 @@ STATE=$(MERCHANT_KEY="$(get MERCHANT_KEY)" DEALER_KEY="$(get DEALER_KEY || true)
       return "key-old";
     }
   };
-  console.log(`${"bid_count" in mv ? "current" : "old"} ${await may(merchant, process.env.MERCHANT_KEY)} ${await may(dealer, process.env.DEALER_KEY)}`);
+  console.log(`${"shop_count" in mv ? "current" : "old"} ${await may(merchant, process.env.MERCHANT_KEY)} ${await may(dealer, process.env.DEALER_KEY)}`);
 ' "$MARKET" "$MERCHANT" "$DEALER" 2>>"$LOG")
 read -r LAYOUT MKEY DKEY <<<"$STATE"
 
@@ -95,3 +95,4 @@ fi
 
 printf "\n\033[1m✅ %s is up to date.\033[0m Restart the shop: node server/server.js\n" "$MARKET"
 grep -q '^DEALER_ID=' server/.env || echo "   To bring Silas, the pearl and ore dealer, to town: ./scripts/add-dealer.sh"
+grep -q '^CLERK_ID=' server/.env || echo "   To appoint the clerk who keeps players' shops: ./scripts/add-clerk.sh"

@@ -230,6 +230,18 @@ pub const AUCTION_MIN_MS: u64 = 60 * 1000;
 pub const AUCTION_MAX_MS: u64 = 30 * 60 * 1000;
 pub const BID_STEP_PCT: u128 = 5;
 pub const AUCTION_EXTEND_MS: u64 = 30 * 1000;
+/// Player shops: pitches in the village, rented by the day (the rent goes to
+/// the mainland's purse), each kept by the clerk the owner of the market
+/// appoints. A shop's goods are its owner's notices, up to six of them.
+pub const MAX_PITCHES: usize = 4;
+pub const PITCH_RENT: u128 = 40 * COIN;
+pub const PITCH_DAY_MS: u64 = 24 * 60 * 60 * 1000;
+pub const PITCH_MAX_AHEAD_MS: u64 = 2 * PITCH_DAY_MS;
+pub const MAX_LISTINGS_PER_SHOP: usize = 6;
+pub const MAX_CLERK_BLOCKED: usize = 20;
+/// What a shop is called after its owner's name ("Guest 7f1f's Tackle"):
+/// picked from a list, so there is no free text to police.
+pub const SHOP_KINDS: [&str; 6] = ["Stall", "Tackle", "Wares", "Trading Post", "Sundries", "Store"];
 
 pub const MAX_TRADES: usize = 40;
 pub const MAX_BLOCKED: usize = 30;
@@ -610,6 +622,11 @@ pub struct MarketView {
     pub orders_filled: u32,
     pub offers_taken: u32,
     pub auctions_sold: u32,
+    /// Player shops open now (see `get_player_shops`), their clerk, and the
+    /// clerk's refused moves (see `get_clerk_blocked`).
+    pub shop_count: u32,
+    pub clerk_id: Option<AccountId>,
+    pub clerk_blocked_count: u64,
 }
 
 #[near(serializers = [json])]
@@ -740,6 +757,25 @@ pub struct Auction {
     pub settled: bool,
 }
 
+/// A player's shop on one of the village's pitches.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerShop {
+    pub owner: AccountId,
+    /// Index into `SHOP_KINDS`.
+    pub kind: u8,
+    /// Which pitch (0..4).
+    pub pitch: u8,
+    /// The least the clerk may ask for, or take for, each item, in `TOKENS`
+    /// order. The owner sets it; the clerk cannot go below it.
+    pub floor: Vec<NearToken>,
+    pub opened_ms: u64,
+    pub paid_until_ms: u64,
+    pub sales: u32,
+    pub takings: NearToken,
+    pub reprices: u32,
+}
+
 #[near(serializers = [json])]
 pub struct BidResult {
     /// "posted", "blocked", "sold", "countered" or "declined".
@@ -752,6 +788,75 @@ pub struct BidResult {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Market {
+    owner_id: AccountId,
+    merchant_id: AccountId,
+    frozen: bool,
+    policy: Policy,
+    energy_max: u32,
+    energy_regen_ms: u64,
+    players: LookupMap<AccountId, Player>,
+    player_count: u32,
+    quotes: LookupMap<AccountId, Quote>,
+    stock: [u32; N],
+    /// Total cost of the stock on the shelves (average-cost accounting).
+    cost: [u128; N],
+    supply: [u64; N],
+    treasury: u128,
+    profit: i128,
+    total_sales: u128,
+    total_purchases: u128,
+    mainland_fund: u128,
+    total_exports: u128,
+    window_start_ms: u64,
+    bought_in_window: u128,
+    next_id: u64,
+    trade_count: u64,
+    blocked_count: u64,
+    trades: Vec<Trade>,
+    blocked: Vec<Blocked>,
+    keepers: Vec<Keeper>,
+    listings: Vec<Listing>,
+    board_sales: Vec<BoardSale>,
+    board_sale_count: u64,
+    board_version: u64,
+    dealer: Option<Dealer>,
+    dealer_quotes: LookupMap<AccountId, Quote>,
+    /// Maren's and Silas's shops (`MAREN`, `SILAS`): open or shut, and their IOUs.
+    shops: Vec<Shop>,
+    /// NEAR waiting for each investor (or insured player) to collect.
+    credit: LookupMap<AccountId, u128>,
+    credit_total: u128,
+    reputation: LookupMap<AccountId, Reputation>,
+    loans: LookupMap<AccountId, Loan>,
+    loan_list: Vec<AccountId>,
+    covers: LookupMap<AccountId, Cover>,
+    /// (storm start, covers sold for it)
+    cover_tally: (u64, u32),
+    premiums: u128,
+    payouts: u128,
+    covers_sold: u32,
+    claims_paid: u32,
+    /// Maren's wanted orders and players' offers on notices.
+    bids: Vec<Bid>,
+    /// Her auction: the one running, or the last one.
+    auction: Option<Auction>,
+    /// NEAR held for players' bids (offers and the top auction bid).
+    bids_held: u128,
+    orders_filled: u32,
+    offers_taken: u32,
+    auctions_sold: u32,
+    /// The village's pitches for player shops (`MAX_PITCHES` of them).
+    pitches: Vec<Option<PlayerShop>>,
+    /// The clerk who keeps players' shops (appointed by the owner).
+    clerk_id: Option<AccountId>,
+    clerk_blocked: Vec<Blocked>,
+    clerk_blocked_count: u64,
+    rent_paid: u128,
+}
+
+/// The state layout with bids, before player shops (v5), read once by `migrate`.
+#[near(serializers = [borsh])]
+pub struct MarketV5 {
     owner_id: AccountId,
     merchant_id: AccountId,
     frozen: bool,
@@ -968,6 +1073,11 @@ pub struct MarketV1 {
     keepers: Vec<Keeper>,
 }
 
+fn validate_floor(floor: &[NearToken]) {
+    require!(floor.len() == N, "One floor price per item");
+    require!(floor.iter().all(|f| f.as_yoctonear() <= MAX_UNIT_PRICE), "That floor is too high");
+}
+
 fn token_index(token_id: &str) -> usize {
     TOKENS
         .iter()
@@ -1101,10 +1211,15 @@ impl Market {
             orders_filled: 0,
             offers_taken: 0,
             auctions_sold: 0,
+            pitches: vec![None; MAX_PITCHES],
+            clerk_id: None,
+            clerk_blocked: Vec::new(),
+            clerk_blocked_count: 0,
+            rent_paid: 0,
         }
     }
 
-    /// Upgrade from an older state layout: v4 (before bids), v3 (before investors, loans, storm
+    /// Upgrade from an older state layout: v5 (before player shops), v4 (before bids), v3 (before investors, loans, storm
     /// cover and reputation), v2 (before the dealer) or v1 (before the notice
     /// board). Keeps every player, item, trade, keeper, notice and the dealer.
     /// Only the contract account itself can call it, in the same transaction
@@ -1113,17 +1228,20 @@ impl Market {
     #[init(ignore_state)]
     pub fn migrate() -> Self {
         let raw = env::storage_read(b"STATE").unwrap_or_else(|| env::panic_str("No state to migrate"));
+        if let Ok(old) = MarketV5::try_from_slice(&raw) {
+            return Self::from_v5(old);
+        }
         if let Ok(old) = MarketV4::try_from_slice(&raw) {
-            return Self::from_v4(old);
+            return Self::from_v5(Self::v4_to_v5(old));
         }
         if let Ok(old) = MarketV3::try_from_slice(&raw) {
-            return Self::from_v4(Self::v3_to_v4(old));
+            return Self::from_v5(Self::v4_to_v5(Self::v3_to_v4(old)));
         }
         if let Ok(old) = MarketV2::try_from_slice(&raw) {
-            return Self::from_v4(Self::v3_to_v4(Self::v2_to_v3(old)));
+            return Self::from_v5(Self::v4_to_v5(Self::v3_to_v4(Self::v2_to_v3(old))));
         }
         let old = MarketV1::try_from_slice(&raw).unwrap_or_else(|_| env::panic_str("Cannot deserialize the old state: is it already upgraded?"));
-        Self::from_v4(Self::v3_to_v4(Self::v2_to_v3(MarketV2 {
+        Self::from_v5(Self::v4_to_v5(Self::v3_to_v4(Self::v2_to_v3(MarketV2 {
             owner_id: old.owner_id,
             merchant_id: old.merchant_id,
             frozen: old.frozen,
@@ -1154,7 +1272,7 @@ impl Market {
             board_sales: Vec::new(),
             board_sale_count: 0,
             board_version: 0,
-        })))
+        }))))
     }
 
     fn v2_to_v3(old: MarketV2) -> MarketV3 {
@@ -1243,8 +1361,8 @@ impl Market {
         }
     }
 
-    fn from_v4(old: MarketV4) -> Self {
-        Self {
+    fn v4_to_v5(old: MarketV4) -> MarketV5 {
+        MarketV5 {
             owner_id: old.owner_id,
             merchant_id: old.merchant_id,
             frozen: old.frozen,
@@ -1295,6 +1413,66 @@ impl Market {
             orders_filled: 0,
             offers_taken: 0,
             auctions_sold: 0,
+        }
+    }
+
+    fn from_v5(old: MarketV5) -> Self {
+        Self {
+            owner_id: old.owner_id,
+            merchant_id: old.merchant_id,
+            frozen: old.frozen,
+            policy: old.policy,
+            energy_max: old.energy_max,
+            energy_regen_ms: old.energy_regen_ms,
+            players: old.players,
+            player_count: old.player_count,
+            quotes: old.quotes,
+            stock: old.stock,
+            cost: old.cost,
+            supply: old.supply,
+            treasury: old.treasury,
+            profit: old.profit,
+            total_sales: old.total_sales,
+            total_purchases: old.total_purchases,
+            mainland_fund: old.mainland_fund,
+            total_exports: old.total_exports,
+            window_start_ms: old.window_start_ms,
+            bought_in_window: old.bought_in_window,
+            next_id: old.next_id,
+            trade_count: old.trade_count,
+            blocked_count: old.blocked_count,
+            trades: old.trades,
+            blocked: old.blocked,
+            keepers: old.keepers,
+            listings: old.listings,
+            board_sales: old.board_sales,
+            board_sale_count: old.board_sale_count,
+            board_version: old.board_version,
+            dealer: old.dealer,
+            dealer_quotes: old.dealer_quotes,
+            shops: old.shops,
+            credit: old.credit,
+            credit_total: old.credit_total,
+            reputation: old.reputation,
+            loans: old.loans,
+            loan_list: old.loan_list,
+            covers: old.covers,
+            cover_tally: old.cover_tally,
+            premiums: old.premiums,
+            payouts: old.payouts,
+            covers_sold: old.covers_sold,
+            claims_paid: old.claims_paid,
+            bids: old.bids,
+            auction: old.auction,
+            bids_held: old.bids_held,
+            orders_filled: old.orders_filled,
+            offers_taken: old.offers_taken,
+            auctions_sold: old.auctions_sold,
+            pitches: vec![None; MAX_PITCHES],
+            clerk_id: None,
+            clerk_blocked: Vec::new(),
+            clerk_blocked_count: 0,
+            rent_paid: 0,
         }
     }
 
@@ -1611,9 +1789,10 @@ impl Market {
         self.sweep_board();
         let mut p = self.player(&seller);
         require!(p.items[t] >= qty, "You do not have that many");
+        let cap = if self.live_shop(&seller).is_some() { MAX_LISTINGS_PER_SHOP } else { MAX_LISTINGS_PER_SELLER };
         require!(
-            self.listings.iter().filter(|l| l.seller == seller).count() < MAX_LISTINGS_PER_SELLER,
-            format!("You already have {MAX_LISTINGS_PER_SELLER} notices up. Take one down first.")
+            self.listings.iter().filter(|l| l.seller == seller).count() < cap,
+            format!("You already have {cap} notices up. Take one down first.")
         );
         require!(self.listings.len() < MAX_LISTINGS, "The notice board is full");
         p.items[t] -= qty;
@@ -1807,7 +1986,17 @@ impl Market {
         require!(b.kind == BidKind::Offer, "That is not an offer");
         let li = self.listing_index(b.on.unwrap());
         let l = self.listings[li].clone();
-        require!(l.seller == who, "That offer is not on your notice");
+        // the shop's clerk may answer for its owner, never below the owner's floor
+        let floor = match self.live_shop(&l.seller) {
+            Some(k) if Some(&who) == self.clerk_id.as_ref() => Some(self.pitches[k].as_ref().unwrap().floor[token_index(&l.token_id)].as_yoctonear()),
+            _ => None,
+        };
+        require!(l.seller == who || floor.is_some(), "That offer is not on your notice");
+        let at = if answer == "counter" { counter.map_or(0, |c| c.as_yoctonear()) } else { b.unit_price.as_yoctonear() };
+        if answer != "decline" && floor.is_some_and(|f| at < f) {
+            self.clerk_refused(&l.seller, &l.token_id, b.qty, at * b.qty as u128, "below_owner_floor");
+            return BidResult { status: "blocked".into(), reason: Some("below_owner_floor".into()), bid: None, sale: None };
+        }
         match answer.as_str() {
             "accept" => {
                 if let Some(reason) = self.seller_refuses(&l, &b, b.unit_price.as_yoctonear()) {
@@ -2048,6 +2237,110 @@ impl Market {
         self.board_version += 1;
         emit_game("auction_started", json!(a));
         a
+    }
+
+
+    // ------------------------------------------------------------------
+    // Player shops: a pitch, the owner's goods, and a clerk who keeps them
+    // ------------------------------------------------------------------
+
+    /// Rent a free pitch for a day (attach 40 coins; they go to the mainland's
+    /// purse) and open a shop: `kind` names it (see `SHOP_KINDS`), and `floor`
+    /// is the least the clerk may ask or take for each item (in `TOKENS` order).
+    /// Your notices are the shop's goods, up to six; the clerk prices them and
+    /// answers offers on them, never below your floor, and buyers pay you.
+    #[payable]
+    pub fn open_shop(&mut self, kind: u8, floor: Vec<NearToken>) -> PlayerShop {
+        let who = env::predecessor_account_id();
+        require!(self.party(&who) == Party::Player && Some(&who) != self.clerk_id.as_ref(), "Merchants keep their own stalls");
+        self.player(&who); // (players only)
+        require!((kind as usize) < SHOP_KINDS.len(), "Pick a kind of shop");
+        validate_floor(&floor);
+        require!(self.live_shop(&who).is_none(), "You already have a shop");
+        let now = env::block_timestamp_ms();
+        let pitch = self.pitches.iter().position(|p| p.as_ref().map_or(true, |s| now > s.paid_until_ms)).unwrap_or_else(|| env::panic_str("Every pitch is taken"));
+        self.take_rent(&who);
+        let shop = PlayerShop {
+            owner: who,
+            kind,
+            pitch: pitch as u8,
+            floor,
+            opened_ms: now,
+            paid_until_ms: now + PITCH_DAY_MS,
+            sales: 0,
+            takings: NearToken::from_yoctonear(0),
+            reprices: 0,
+        };
+        self.pitches[pitch] = Some(shop.clone());
+        self.board_version += 1;
+        emit_game("shop_opened", json!(shop));
+        shop
+    }
+
+    /// Pay another day's rent on your pitch (at most two days ahead).
+    #[payable]
+    pub fn renew_shop(&mut self) -> PlayerShop {
+        let who = env::predecessor_account_id();
+        let k = self.live_shop(&who).unwrap_or_else(|| env::panic_str("You have no shop"));
+        let now = env::block_timestamp_ms();
+        let until = self.pitches[k].as_ref().unwrap().paid_until_ms + PITCH_DAY_MS;
+        require!(until <= now + PITCH_MAX_AHEAD_MS, "The rent is paid two days ahead already");
+        self.take_rent(&who);
+        let shop = self.pitches[k].as_mut().unwrap();
+        shop.paid_until_ms = until;
+        shop.clone()
+    }
+
+    /// Change the least the clerk may ask or take for each item.
+    pub fn set_shop_floor(&mut self, floor: Vec<NearToken>) -> PlayerShop {
+        let who = env::predecessor_account_id();
+        let k = self.live_shop(&who).unwrap_or_else(|| env::panic_str("You have no shop"));
+        validate_floor(&floor);
+        let shop = self.pitches[k].as_mut().unwrap();
+        shop.floor = floor;
+        self.board_version += 1;
+        self.pitches[k].clone().unwrap()
+    }
+
+    /// Give up your pitch (the rent is not refunded). Your notices stay up as
+    /// ordinary notices.
+    pub fn close_shop(&mut self) {
+        let who = env::predecessor_account_id();
+        let k = self.live_shop(&who).unwrap_or_else(|| env::panic_str("You have no shop"));
+        self.pitches[k] = None;
+        self.board_version += 1;
+        emit_game("shop_closed_by_owner", json!({ "owner": who, "pitch": k }));
+    }
+
+    /// The clerk sets the price of a notice in a player's shop. It may not go
+    /// below the owner's floor for that item: a refusal is recorded instead.
+    pub fn clerk_reprice(&mut self, listing_id: u64, unit_price: NearToken) -> ListResult {
+        require!(Some(&env::predecessor_account_id()) == self.clerk_id.as_ref(), "Clerk only");
+        self.sweep_board();
+        let i = self.listing_index(listing_id);
+        let l = self.listings[i].clone();
+        let k = self.live_shop(&l.seller).unwrap_or_else(|| env::panic_str("That notice is not in a shop"));
+        let price = unit_price.as_yoctonear();
+        require!(price > 0 && price <= MAX_UNIT_PRICE, "Bad price");
+        let t = token_index(&l.token_id);
+        if price < self.pitches[k].as_ref().unwrap().floor[t].as_yoctonear() {
+            self.clerk_refused(&l.seller, &l.token_id, l.qty, price * l.qty as u128, "below_owner_floor");
+            return ListResult { status: "blocked".into(), reason: Some("below_owner_floor".into()), listing: None };
+        }
+        self.listings[i].unit_price = unit_price;
+        self.pitches[k].as_mut().unwrap().reprices += 1;
+        self.board_version += 1;
+        let listing = self.listings[i].clone();
+        emit_game("repriced", json!(listing));
+        ListResult { status: "listed".into(), reason: None, listing: Some(listing) }
+    }
+
+    /// Appoint the clerk who keeps players' shops (owner only).
+    #[payable]
+    pub fn set_clerk(&mut self, account_id: AccountId) {
+        self.assert_owner();
+        require!(self.party(&account_id) == Party::Player && account_id != env::current_account_id(), "The clerk needs an account of its own");
+        self.clerk_id = Some(account_id);
     }
 
     // ------------------------------------------------------------------
@@ -2819,6 +3112,9 @@ impl Market {
             orders_filled: self.orders_filled,
             offers_taken: self.offers_taken,
             auctions_sold: self.auctions_sold,
+            shop_count: self.live_pitches().count() as u32,
+            clerk_id: self.clerk_id.clone(),
+            clerk_blocked_count: self.clerk_blocked_count,
         }
     }
 
@@ -2865,6 +3161,17 @@ impl Market {
     }
 
     /// Every tool Maren has out on loan.
+    /// Player shops open now.
+    pub fn get_player_shops(&self) -> Vec<PlayerShop> {
+        self.live_pitches().cloned().collect()
+    }
+
+    /// What the clerk tried to do and the contract refused, newest last.
+    pub fn get_clerk_blocked(&self, limit: Option<u32>) -> Vec<Blocked> {
+        let n = limit.unwrap_or(10) as usize;
+        self.clerk_blocked.iter().rev().take(n).rev().cloned().collect()
+    }
+
     /// Open orders and offers on the board.
     pub fn get_bids(&self) -> Vec<Bid> {
         self.bids.clone()
@@ -2934,6 +3241,14 @@ impl Market {
                 "max_orders": MAX_ORDERS,
                 "bid_step_pct": BID_STEP_PCT,
                 "auction_extend_sec": AUCTION_EXTEND_MS / 1000,
+            },
+            "shops": {
+                "pitches": MAX_PITCHES,
+                "rent": NearToken::from_yoctonear(PITCH_RENT),
+                "day_sec": PITCH_DAY_MS / 1000,
+                "max_ahead_sec": PITCH_MAX_AHEAD_MS / 1000,
+                "max_notices": MAX_LISTINGS_PER_SHOP,
+                "kinds": SHOP_KINDS,
             },
         })
     }
@@ -3231,6 +3546,44 @@ impl Market {
             repaid: NearToken::from_yoctonear(shop.repaid),
             iou_count: shop.ious.len() as u32,
         }
+    }
+
+    /// The pitches with a shop whose rent is paid.
+    fn live_pitches(&self) -> impl Iterator<Item = &PlayerShop> {
+        let now = env::block_timestamp_ms();
+        self.pitches.iter().flatten().filter(move |s| now <= s.paid_until_ms)
+    }
+
+    /// The pitch of `owner`'s shop, if it is open.
+    fn live_shop(&self, owner: &AccountId) -> Option<usize> {
+        let now = env::block_timestamp_ms();
+        self.pitches.iter().position(|p| p.as_ref().is_some_and(|s| s.owner == *owner && now <= s.paid_until_ms))
+    }
+
+    /// A day's rent from the attached deposit, into the mainland's purse.
+    fn take_rent(&mut self, who: &AccountId) {
+        let paid = env::attached_deposit().as_yoctonear();
+        require!(paid >= PITCH_RENT, "Attach the day's rent: 40 coins");
+        if paid > PITCH_RENT {
+            Promise::new(who.clone()).transfer(NearToken::from_yoctonear(paid - PITCH_RENT)).detach();
+        }
+        self.mainland_fund += PITCH_RENT;
+        self.rent_paid += PITCH_RENT;
+    }
+
+    fn clerk_refused(&mut self, owner: &AccountId, token_id: &str, qty: u32, total: u128, reason: &str) {
+        let blocked = Blocked {
+            player: owner.clone(),
+            side: Side::Sell,
+            token_id: token_id.to_string(),
+            qty,
+            total: NearToken::from_yoctonear(total),
+            reason: reason.to_string(),
+            timestamp_ms: env::block_timestamp_ms(),
+        };
+        emit_game("clerk_blocked", json!(blocked));
+        self.clerk_blocked_count += 1;
+        push_capped(&mut self.clerk_blocked, blocked, MAX_CLERK_BLOCKED);
     }
 
     /// Maren buys goods a player has handed over: onto her shelf at what she
@@ -3539,6 +3892,11 @@ impl Market {
                 let mut s = self.player(&sale.seller);
                 s.trades += 1;
                 self.players.insert(sale.seller.clone(), s);
+                if let Some(k) = self.live_shop(&sale.seller) {
+                    let shop = self.pitches[k].as_mut().unwrap();
+                    shop.sales += 1;
+                    shop.takings = NearToken::from_yoctonear(shop.takings.as_yoctonear() + total);
+                }
                 let kept = self.withhold_for_loan(&sale.seller, total);
                 if total > kept {
                     Promise::new(sale.seller.clone()).transfer(NearToken::from_yoctonear(total - kept)).detach();
@@ -5153,6 +5511,27 @@ mod tests {
         assert!(MarketV4::try_from_slice(&env::storage_read(b"STATE").unwrap()).is_err());
     }
 
+    const LIVE_V5_STATE: &[u8] = include_bytes!("../tests/fixtures/v5_state.bin");
+
+    #[test]
+    fn migrate_keeps_the_live_v5_state() {
+        ctx(contract(), ZERO, 1_794_620_000);
+        env::storage_write(b"STATE", LIVE_V5_STATE);
+        let raw = MarketV5::try_from_slice(LIVE_V5_STATE).unwrap();
+        let (players, trades, treasury, mainland, auction) = (raw.player_count, raw.trade_count, raw.treasury, raw.mainland_fund, raw.auction.clone());
+        let m = Market::migrate();
+        let mv = m.get_market();
+        assert_eq!((mv.player_count, mv.trade_count, mv.treasury.as_yoctonear(), mv.mainland_fund.as_yoctonear()), (players, trades, treasury, mainland));
+        assert!(auction.is_some(), "the live market had held its first auction");
+        assert_eq!(m.get_auction(), auction);
+        // no shops and no clerk yet
+        assert!(m.get_player_shops().is_empty() && mv.clerk_id.is_none() && mv.shop_count == 0);
+        env::state_write(&m);
+        let again: Market = env::state_read().unwrap();
+        assert_eq!(again.get_market().trade_count, trades);
+        assert!(MarketV5::try_from_slice(&env::storage_read(b"STATE").unwrap()).is_err());
+    }
+
     /// Run Maren's treasury down by buying ore from alice (one quote per call).
     fn sell_maren_ore(m: &mut Market, qty: u32, total: u128, ts: u64) -> QuoteResult {
         give(m, alice(), ORE, qty);
@@ -5904,5 +6283,171 @@ mod tests {
         ctx(merchant(), ZERO, 1000);
         m.start_auction("beacon".into(), coins(450), 1_300_000);
         m.start_auction("beacon".into(), coins(450), 1_300_000);
+    }
+
+    // ---------- player shops and their clerk ----------
+
+    fn clerk() -> AccountId {
+        acc("clerk.testnet")
+    }
+
+    /// Floors: 3 a kelp, 10 a pickaxe, nothing else.
+    fn floors() -> Vec<NearToken> {
+        let mut f = vec![ZERO; N];
+        f[KELP] = coins(3);
+        f[PICKAXE] = coins(10);
+        f
+    }
+
+    /// `setup()` with a clerk appointed and alice's shop open at second 1000.
+    fn with_shop() -> Market {
+        let mut m = setup();
+        ctx(owner(), YOCTO, 1000);
+        m.set_clerk(clerk());
+        ctx(alice(), coins(40), 1000);
+        m.open_shop(1, floors());
+        m
+    }
+
+    #[test]
+    fn a_player_rents_a_pitch_and_the_rent_goes_to_the_mainland() {
+        let mut m = setup();
+        let before = m.get_market().mainland_fund;
+        ctx(alice(), coins(45), 1000);
+        let shop = m.open_shop(1, floors());
+        assert_eq!((shop.pitch, shop.kind, shop.paid_until_ms), (0, 1, 1_000_000 + PITCH_DAY_MS));
+        assert!(transfers().contains(&(alice(), coins(5))), "the change comes back");
+        let mv = m.get_market();
+        assert_eq!(mv.mainland_fund.as_yoctonear(), before.as_yoctonear() + PITCH_RENT);
+        assert_eq!(mv.shop_count, 1);
+        assert_eq!(m.get_player_shops()[0].owner, alice());
+    }
+
+    #[test]
+    #[should_panic(expected = "You already have a shop")]
+    fn one_shop_each() {
+        let mut m = with_shop();
+        ctx(alice(), coins(40), 1001);
+        m.open_shop(0, floors());
+    }
+
+    #[test]
+    fn four_pitches_and_a_lapsed_one_is_free_again() {
+        let mut m = with_shop();
+        for (i, who) in ["b.testnet", "c.testnet", "d.testnet"].iter().enumerate() {
+            join(&mut m, acc(who));
+            ctx(acc(who), coins(40), 1001);
+            assert_eq!(m.open_shop(0, floors()).pitch as usize, i + 1);
+        }
+        join(&mut m, acc("e.testnet"));
+        ctx(acc("e.testnet"), coins(40), 1002);
+        let full = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.open_shop(0, floors())));
+        assert!(full.is_err(), "every pitch is taken");
+        // alice's day runs out: her pitch is free for the next player
+        ctx(acc("e.testnet"), coins(40), 1000 + PITCH_DAY_MS / 1000 + 1);
+        assert_eq!(m.open_shop(2, floors()).pitch, 0);
+        assert_eq!(m.get_player_shops().len(), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "The rent is paid two days ahead already")]
+    fn rent_is_paid_at_most_two_days_ahead() {
+        let mut m = with_shop();
+        ctx(alice(), coins(40), 1010);
+        assert_eq!(m.renew_shop().paid_until_ms, 1_000_000 + 2 * PITCH_DAY_MS);
+        ctx(alice(), coins(40), 1020);
+        m.renew_shop();
+    }
+
+    #[test]
+    fn a_shop_holds_six_notices() {
+        let mut m = with_shop();
+        give(&mut m, alice(), KELP, 7);
+        for i in 0..6 {
+            list(&mut m, alice(), "kelp", 1, 5, 1010 + i);
+        }
+        let seventh = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list(&mut m, alice(), "kelp", 1, 5, 1020)));
+        assert!(seventh.is_err());
+        assert_eq!(m.get_listings().len(), 6);
+    }
+
+    #[test]
+    fn the_clerk_reprices_within_the_owners_floor() {
+        let mut m = with_shop();
+        give(&mut m, alice(), KELP, 2);
+        let l = list(&mut m, alice(), "kelp", 2, 9, 1010);
+        ctx(clerk(), ZERO, 1020);
+        let r = m.clerk_reprice(l.id, coins(6));
+        assert_eq!((r.status.as_str(), r.listing.unwrap().unit_price), ("listed", coins(6)));
+        // below her floor of 3: refused and recorded
+        let r = m.clerk_reprice(l.id, coins(2));
+        assert_eq!((r.status.as_str(), r.reason.as_deref()), ("blocked", Some("below_owner_floor")));
+        assert_eq!(m.get_clerk_blocked(Some(1))[0].reason, "below_owner_floor");
+        assert_eq!(m.get_listings()[0].unit_price, coins(6));
+        assert_eq!((m.get_player_shops()[0].reprices, m.get_market().clerk_blocked_count), (1, 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Clerk only")]
+    fn only_the_clerk_reprices() {
+        let mut m = with_shop();
+        give(&mut m, alice(), KELP, 1);
+        let l = list(&mut m, alice(), "kelp", 1, 9, 1010);
+        ctx(bob(), ZERO, 1020);
+        m.clerk_reprice(l.id, coins(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "That notice is not in a shop")]
+    fn the_clerk_keeps_shops_only() {
+        let mut m = with_shop();
+        join(&mut m, bob());
+        give(&mut m, bob(), KELP, 1);
+        let l = list(&mut m, bob(), "kelp", 1, 9, 1010);
+        ctx(clerk(), ZERO, 1020);
+        m.clerk_reprice(l.id, coins(4));
+    }
+
+    #[test]
+    fn the_clerk_answers_offers_within_the_floor_and_the_owner_is_paid() {
+        let mut m = with_shop();
+        join(&mut m, bob());
+        give(&mut m, alice(), PICKAXE, 1);
+        let l = list(&mut m, alice(), "pickaxe", 1, 40, 1010);
+        let low = offer(&mut m, bob(), l.id, 1, 8, 1020);
+        ctx(clerk(), ZERO, 1030);
+        let r = m.answer_offer(low.id, "accept".into(), None);
+        assert_eq!(r.reason.as_deref(), Some("below_owner_floor"));
+        assert_eq!(m.answer_offer(low.id, "counter".into(), Some(coins(9))).reason.as_deref(), Some("below_owner_floor"));
+        assert_eq!(m.answer_offer(low.id, "counter".into(), Some(coins(30))).status, "countered");
+        ctx(bob(), coins(22), 1040);
+        m.accept_counter(low.id);
+        assert!(transfers().contains(&(alice(), coins(30))), "the buyer's coins go to the owner, not the clerk");
+        let shop = &m.get_player_shops()[0];
+        assert_eq!((shop.sales, shop.takings), (1, coins(30)));
+        assert_eq!(items(&m, bob())[PICKAXE], 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "That offer is not on your notice")]
+    fn the_clerk_stops_when_the_shop_closes() {
+        let mut m = with_shop();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 1);
+        let l = list(&mut m, alice(), "kelp", 1, 9, 1010);
+        let b = offer(&mut m, bob(), l.id, 1, 5, 1020);
+        ctx(alice(), ZERO, 1030);
+        m.close_shop();
+        assert!(m.get_player_shops().is_empty());
+        ctx(clerk(), ZERO, 1040);
+        m.answer_offer(b.id, "accept".into(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Owner only")]
+    fn only_the_owner_appoints_the_clerk() {
+        let mut m = setup();
+        ctx(alice(), YOCTO, 1000);
+        m.set_clerk(clerk());
     }
 }
