@@ -307,6 +307,52 @@ const theirGain = yoctoToCoins((await near.balance(neighbour)) - theirsBefore);
 for (let i = 0; i < 10 && have((p = await player()), spare) !== held + 1; i++) await sleep(1000);
 check(have(p, spare) === held + 1 && Math.abs(theirGain - 7) < 0.01, `the ${spare} is mine, and the neighbour got 7 coins (their purse +${theirGain.toFixed(1)})`);
 
+// A player's shop: the neighbour rents a pitch, and the clerk minds their goods
+const shopTerms = await api("/api/market?player=" + me);
+if (!shopTerms.clerk) console.log("\n  (no clerk in this village yet: skipping player shops)");
+else {
+  console.log(`\n▸ A shop of the neighbour's own, kept by the clerk`);
+  const T = shopTerms.terms;
+  let bag = (await near.view(cfg.contract, "get_player", { account_id: neighbour })).items;
+  for (let i = 0; i < 3 && bag[0] + bag[1] === 0; i++) {
+    await ncall("forage", { spot: "shore" });
+    bag = (await near.view(cfg.contract, "get_player", { account_id: neighbour })).items;
+  }
+  const good = bag[0] >= bag[1] ? "kelp" : "driftwood";
+  const floor = TOK.map((t) => coinsToYocto(t === good ? 2 : 0).toString());
+  const shop = (await ncall("open_shop", { kind: 1, floor }, coinsToYocto(T.pitchRent))).value;
+  say("them", `rented pitch ${shop.pitch + 1} for ${T.pitchRent} coins: a shop of their own (never below 2 for ${good})`);
+  const goodsOut = (await ncall("list_item", { token_id: good, qty: 1, unit_price: coinsToYocto(30).toString() })).value;
+  say("them", `put 1 ${good} on the table at 30 coins; the clerk will price it`);
+  const noticeNow = async () => (await near.view(cfg.contract, "get_listings")).find((l) => l.id === goodsOut.id);
+  let priced = null;
+  for (let i = 0; i < 45 && !priced; i++) {
+    await sleep(1000);
+    const l = await noticeNow();
+    if (l && yoctoToCoins(l.unit_price) !== 30) priced = l;
+  }
+  const price = priced ? yoctoToCoins(priced.unit_price) : null;
+  check(price !== null && price >= 2 && price < 30, `the clerk repriced it by the market: ${price} coins (never below their 2)`);
+  if (price !== null) {
+    await call("make_offer", { listing_id: goodsOut.id, qty: 1, unit_price: coinsToYocto(1).toString() }, coinsToYocto(1));
+    say("me", "offered 1 coin for it");
+    const turned = await bidsWhen((b) => !b.some((x) => x.on === goodsOut.id));
+    check(!turned.some((x) => x.on === goodsOut.id), "the clerk turned my lowball offer down (the coin came back)");
+    await sleep(2600);
+    const before = await near.balance(neighbour);
+    const l = await noticeNow();
+    await call("buy_listing", { id: goodsOut.id, qty: 1 }, BigInt(l.unit_price));
+    await sleep(2600);
+    const paid = yoctoToCoins((await near.balance(neighbour)) - before);
+    const shops = await near.view(cfg.contract, "get_player_shops");
+    const theirs = shops.find((s) => s.owner === neighbour);
+    check(Math.abs(paid - yoctoToCoins(l.unit_price)) < 0.01 && theirs?.sales === 1, `bought it at the clerk's price; the ${yoctoToCoins(l.unit_price)} coins went to the neighbour, not the clerk`);
+  }
+  await ncall("close_shop");
+  const after = await near.view(cfg.contract, "get_player_shops");
+  check(!after.some((s) => s.owner === neighbour), "the neighbour gave up the pitch for the next player");
+}
+
 // Maren's wanted orders: fill one if she has one out and I have the goods
 const wanted = (await api("/api/market?player=" + me)).bids?.orders ?? [];
 if (!wanted.length) console.log("  (Maren has no orders out right now)");

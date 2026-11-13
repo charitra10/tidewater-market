@@ -96,10 +96,10 @@
   @keyframes toast { 0% { opacity: 0; transform: translateY(-8px); } 8%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
 
   /* Maren's stall */
-  #shop, #notices, #bench { position: fixed; z-index: 10; top: 12px; right: 12px; bottom: 12px; width: min(430px, calc(100vw - 24px)); display: flex; flex-direction: column; overflow: hidden; }
-  #shop header, #notices header, #bench header { display: flex; gap: 12px; align-items: center; padding: 14px 14px 10px; }
-  #shop header .who, #notices header .who, #bench header .who { flex: 1; }
-  #shop header h2, #notices header h2, #bench header h2 { font-size: 21px; }
+  #shop, #notices, #bench, #pitch { position: fixed; z-index: 10; top: 12px; right: 12px; bottom: 12px; width: min(430px, calc(100vw - 24px)); display: flex; flex-direction: column; overflow: hidden; }
+  #shop header, #notices header, #bench header, #pitch header { display: flex; gap: 12px; align-items: center; padding: 14px 14px 10px; }
+  #shop header .who, #notices header .who, #bench header .who, #pitch header .who { flex: 1; }
+  #shop header h2, #notices header h2, #bench header h2, #pitch header h2 { font-size: 21px; }
   .chip { display: inline-block; font-size: 12px; padding: 1px 9px; border-radius: 10px; background: var(--paper-2); color: var(--ink-2); margin-right: 4px; }
   .chip.sour, .chip.wary { background: #f1cfc5; color: #8a2f1f; }
   .chip.warm, .chip.delighted { background: #cfe6cf; color: #2c6a3c; }
@@ -179,6 +179,14 @@
   #notices .intro, #bench .intro { margin: 0 14px; font-size: 13px; color: var(--ink-2); }
   #bench { right: auto; left: 12px; bottom: auto; } /* on the left, so the bench stays in view */
   #bench-list { padding: 6px 14px 12px; }
+  #pitch.left { right: auto; left: 12px; }
+  #pitch .intro { margin: 0 14px; font-size: 13px; color: var(--ink-2); }
+  #pitch-body { flex: 1; overflow: auto; padding: 6px 14px 12px; }
+  #pitch h4 { margin: 14px 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--ink-2); }
+  #pitch .stats { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; margin: 6px 0; }
+  #pitch .act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .item .clerk { color: var(--ink-2); font-style: italic; }
+  body.pitch-open #ticker, body.pitch-open #help, body.pitch-open #goal { visibility: hidden; }
   body.bench-open #ticker, body.bench-open #help, body.bench-open #goal { visibility: hidden; }
   #tide-event { margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--teal); }
   #tide-event.on { color: #6b3fa0; }
@@ -342,6 +350,16 @@
   </header>
   <p class="intro">Twist your own rope and make your own pickaxe from what's in your bag. It costs energy instead of coins: time you're not foraging. Boats and beacon lenses are Maren's work.</p>
   <div id="bench-list"></div>
+</aside>
+
+<aside id="pitch" class="card" hidden>
+  <header>
+    <div><svg viewBox="0 0 56 56" width="56" height="56"><circle cx="28" cy="28" r="28" fill="#e2d6ea"/><rect x="11" y="13" width="3" height="32" fill="#6b4a2b"/><rect x="42" y="13" width="3" height="32" fill="#6b4a2b"/><g><rect x="9" y="11" width="7.6" height="8" fill="#3f7f8c"/><rect x="16.6" y="11" width="7.6" height="8" fill="#f6efe0"/><rect x="24.2" y="11" width="7.6" height="8" fill="#3f7f8c"/><rect x="31.8" y="11" width="7.6" height="8" fill="#f6efe0"/><rect x="39.4" y="11" width="7.6" height="8" fill="#3f7f8c"/></g><rect x="12" y="32" width="32" height="4" fill="#946a40"/><rect x="12" y="36" width="32" height="7" fill="#3f7f8c"/><circle cx="20" cy="28" r="3.5" fill="#c9a24f"/><path d="M27 31l6-8" stroke="#5b5f66" stroke-width="2.5" stroke-linecap="round"/><circle cx="38" cy="28" r="3" fill="#fbf6e8"/></svg></div>
+    <div class="who"><h2 id="pitch-name">A market pitch</h2><span class="chip" id="pitch-chip">to let</span></div>
+    <button class="x" id="pitch-close" title="Step away (Esc)">×</button>
+  </header>
+  <p class="intro" id="pitch-intro"></p>
+  <div id="pitch-body"></div>
 </aside>
 
 <aside id="notices" class="card" hidden>

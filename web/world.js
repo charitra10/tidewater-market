@@ -28,9 +28,16 @@ export const HOTSPOTS = [
   { id: "lighthouse", x: 424, y: 170, r: 72, label: "The old lighthouse", verb: "Climb the lighthouse", pillUp: 44 },
   { id: "board", x: 975, y: 534, r: 62, label: "The notice board", verb: "Read the notice board", pillUp: 150 },
   { id: "bench", x: 1190, y: 594, r: 50, label: "The workbench", verb: "Use the workbench", pillUp: 84 },
+  // the village's pitches for player shops (see PITCHES)
+  { id: "pitch0", x: 1086, y: 432, r: 40, label: "A market pitch", verb: "Visit the pitch", pillUp: 88, pitch: 0 },
+  { id: "pitch1", x: 1150, y: 504, r: 40, label: "A market pitch", verb: "Visit the pitch", pillUp: 88, pitch: 1 },
+  { id: "pitch2", x: 640, y: 398, r: 40, label: "A market pitch", verb: "Visit the pitch", pillUp: 88, pitch: 2 },
+  { id: "pitch3", x: 706, y: 526, r: 40, label: "A market pitch", verb: "Visit the pitch", pillUp: 88, pitch: 3 },
   // only while the dealer is in town (`S.dealer`)
   { id: "dealer", x: 504, y: 344, r: 50, label: "Silas, the dealer", verb: "Trade with Silas", pillUp: 124, needs: "dealer" },
 ];
+/// Where each pitch's table stands (the hotspot is just in front of it).
+export const PITCHES = [{ x: 1086, y: 404 }, { x: 1150, y: 476 }, { x: 640, y: 370 }, { x: 706, y: 498 }];
 /// Is this place there right now? (Silas's pitch only while he is in town.)
 export const present = (h, S) => !h.needs || Boolean(S[h.needs]);
 /// Where the notice board stands (for clicks).
@@ -853,9 +860,76 @@ function drawStall(ctx, t, S) {
     const left = Math.max(0, S.auction.endsMs - Date.now());
     const clock = `${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, "0")}`;
     ctx.fillStyle = "#6b4a2b";
-    ctx.fillRect(x - 124, 346, 5, 58);
-    handSign(ctx, x - 122, 340, "AUCTION", S.auction.top ? `top bid ${Math.round(S.auction.top.unit)} · ${clock}` : `last lens · ${clock}`, Math.sin(t * 1.4) * 0.04);
+    ctx.fillRect(x + 119, 346, 5, 58);
+    handSign(ctx, x + 121, 340, "AUCTION", S.auction.top ? `top bid ${Math.round(S.auction.top.unit)} · ${clock}` : `last lens · ${clock}`, Math.sin(t * 1.4) * 0.04);
   }
+}
+
+/// A player's shop on its pitch: a trestle table under a little canopy, the
+/// owner's goods on it and the shop's name on a board. An empty pitch is a
+/// chalked square with a "to let" stake.
+const CLOTH = ["#3f7f8c", "#8c5a3f", "#5a7f3f", "#7f3f6a", "#3f5a8c", "#8c7f3f"];
+function drawPitch(ctx, t, p, shop, goods) {
+  const { x, y } = p;
+  if (!shop) {
+    ctx.strokeStyle = "rgba(255,255,255,0.32)";
+    ctx.setLineDash([5, 6]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x - 30, y - 18, 60, 26);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#7d5733";
+    ctx.fillRect(x + 24, y - 30, 3, 24);
+    rr(ctx, x + 10, y - 40, 32, 13, 2);
+    ctx.fillStyle = "#f3e7c9";
+    ctx.fill();
+    ctx.fillStyle = "#94392a";
+    ctx.font = "700 7px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("TO LET", x + 26, y - 31);
+    return;
+  }
+  ellipse(ctx, x, y + 6, 40, 6, "rgba(30,60,30,0.22)");
+  const cloth = CLOTH[shop.kind % CLOTH.length];
+  // canopy poles and canopy
+  ctx.fillStyle = "#6b4a2b";
+  ctx.fillRect(x - 34, y - 48, 3, 52);
+  ctx.fillRect(x + 31, y - 48, 3, 52);
+  for (let i = 0; i < 6; i++) {
+    ctx.fillStyle = i % 2 ? "#f6efe0" : cloth;
+    ctx.beginPath();
+    ctx.moveTo(x - 38 + i * 12.7, y - 52);
+    ctx.lineTo(x - 38 + (i + 1) * 12.7, y - 52);
+    ctx.lineTo(x - 38 + (i + 1) * 12.7, y - 40);
+    ctx.lineTo(x - 38 + i * 12.7, y - 40);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // table and cloth
+  ctx.fillStyle = "#946a40";
+  ctx.fillRect(x - 30, y - 10, 60, 6);
+  ctx.fillStyle = cloth;
+  ctx.fillRect(x - 30, y - 6, 60, 10);
+  ctx.fillStyle = "#6b4a2b";
+  ctx.fillRect(x - 27, y + 4, 3, 4);
+  ctx.fillRect(x + 24, y + 4, 3, 4);
+  // what is for sale
+  goods.slice(0, 4).forEach((token, i) => {
+    const img = iconImage(token);
+    if (img.complete) ctx.drawImage(img, x - 26 + i * 13, y - 23, 14, 14);
+  });
+  // the shop's name
+  ctx.font = "700 8px system-ui, sans-serif";
+  const name = shop.mine ? "YOUR SHOP" : shop.name.toUpperCase();
+  const w = Math.min(96, ctx.measureText(name).width + 12);
+  rr(ctx, x - w / 2, y - 66, w, 13, 2);
+  ctx.fillStyle = "#f3e7c9";
+  ctx.fill();
+  ctx.strokeStyle = "#7d5733";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = "#3b332b";
+  ctx.textAlign = "center";
+  ctx.fillText(name, x, y - 57, 90);
 }
 
 /// A hand-written sign hanging on a nail.
@@ -1253,6 +1327,7 @@ export function drawWorld(ctx, t, S) {
     { y: 506, draw: () => drawNoticeBoard(ctx, t, S) },
     { y: 566, draw: () => drawWorkbench(ctx, t) },
     ...(S.dealer ? [{ y: 314, draw: () => drawDealerPitch(ctx, t, S) }] : []),
+    ...PITCHES.map((p, i) => ({ y: p.y, draw: () => drawPitch(ctx, t, p, S.pitchShops?.[i], S.pitchGoods?.[i] ?? []) })),
     ...TREES.map(([x, y, s]) => ({ y, draw: () => drawTree(ctx, x, y, s, t) })),
   ];
   if (!S.atSea) things.push({ y: S.player.y, draw: () => drawPlayer(ctx, S.player, t) });
@@ -1313,12 +1388,18 @@ export function drawWorld(ctx, t, S) {
     ctx.fillStyle = "#fff";
     ctx.textAlign = "left";
     ctx.fillText(S.busyText + dots, px - w / 2 + 12, py + 1);
-  } else if (S.near && !S.shopOpen && !S.boardOpen && !S.benchOpen) {
+  } else if (S.near && !S.shopOpen && !S.boardOpen && !S.benchOpen && !S.pitchOpen) {
     const h = HOTSPOTS.find((s) => s.id === S.near);
     let sub = h.cost ? `${h.cost} energy` : "";
     const outdoors = h.id === "shore" || h.id === "reef" || h.id === "cliffs";
     const weather = !outdoors ? "" : S.storm?.active ? STORM_TEXT[h.id] : h.id !== "cliffs" && S.tide ? TIDE_TEXT[S.tide.phase][h.id] : "";
     if (weather) sub += ` · ${weather}`;
-    pill(ctx, h.x, h.y - (h.pillUp ?? 62), h.verb, sub);
+    let verb = h.verb;
+    if (h.pitch !== undefined) {
+      const shop = S.pitchShops?.[h.pitch];
+      verb = shop ? `Visit ${shop.mine ? "your shop" : shop.name}` : "Rent this pitch";
+      sub = shop ? (shop.mine ? "" : "kept by the clerk") : `${S.pitchRent ?? 40} coins a day`;
+    }
+    pill(ctx, h.x, h.y - (h.pillUp ?? 62), verb, sub);
   }
 }

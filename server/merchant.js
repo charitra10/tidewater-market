@@ -48,7 +48,13 @@ export const TERMS = {
   auctionExtendMs: 30 * 1000, // a bid this close to the end keeps it open this much longer
   auctionMinMs: 60 * 1000,
   auctionMaxMs: 30 * 60 * 1000,
+  pitches: 4, // player shops at once
+  pitchRent: 40, // a day's rent for a pitch, into the mainland's purse
+  pitchDayMs: 24 * 60 * 60 * 1000,
+  shopNotices: 6, // notices a shop may have up (three without one)
 };
+/// What a player's shop is called after its owner ("Guest 7f1f's Tackle"); the contract's SHOP_KINDS.
+export const SHOP_KINDS = ["Stall", "Tackle", "Wares", "Trading Post", "Sundries", "Store"];
 
 /// A player's name in the village (the contract's reputation score) in words,
 /// and the mood Maren starts a haggle in because of it.
@@ -808,4 +814,66 @@ export function offerAnswer({ offer, ask, least }) {
   // a counter goes between the offer and the asking price, and never under their least
   if (offer >= least * 0.8 && least < ask) return { answer: "counter", counter: least };
   return { answer: "decline" };
+}
+
+// ---------------------------------------------------------------------------
+// The clerk who keeps players' shops: prices their notices and answers offers
+// on them, never below the owner's floor (the contract enforces that too)
+// ---------------------------------------------------------------------------
+
+export const CLERK = {
+  rawMarkup: 1.3, // raw goods: 30% over the best a merchant pays (players can't buy them from Maren)
+  undercut: 0.9, // tools: 10% under Maren's asking price
+  agePerTenMin: 0.05, // 5% off for every ten minutes a notice goes unsold...
+  ageLeast: 0.7, // ...down to 70%
+  offerShare: 0.85, // an offer of 85% of the clerk's price is taken
+  repriceGap: 0.08, // the clerk reprices only when the price moves this much (and by a coin)
+  repriceEveryMs: 2 * 60_000, // and not more often than this per notice
+};
+
+/// What the clerk asks for one `token` on a notice listed at `listedMs`, with
+/// its reasons, never below the owner's `floor`. Like askWhy: { price, base, steps, limits }.
+export function clerkWhy(market, { token, floor = 0, listedMs }, now) {
+  const steps = [];
+  let ref;
+  if (RAW.includes(token)) {
+    const maren = Math.max(0, unitBid(market, token));
+    const silas = DEALER_TOKENS.includes(token) && market.dealer ? dealerBid(market.dealer, token) : 0;
+    const best = Math.max(maren, silas);
+    steps.push({ key: "merchants", value: best, note: best === 0 ? "No merchant is buying it right now" : `${silas > maren ? "Silas" : "Maren"} pays about ${n1(best)} for it` });
+    steps.push({ key: "markup", factor: CLERK.rawMarkup, note: "The clerk asks 30% more: players can't buy raw goods from the merchants" });
+    ref = Math.max(best, 1) * CLERK.rawMarkup;
+  } else if (WARES.includes(token) && market.stock[token] > 0) {
+    const ask = unitAsk(market, token);
+    steps.push({ key: "maren", value: ask, note: `Maren asks ${n1(ask)}` });
+    steps.push({ key: "undercut", factor: CLERK.undercut, note: "The clerk undercuts her by 10%" });
+    ref = ask * CLERK.undercut;
+  } else {
+    steps.push({ key: "worth", value: VALUE[token], note: WARES.includes(token) ? `Maren is sold out, so the clerk asks what it is worth on a quiet day (${VALUE[token]})` : `Maren doesn't sell it; worth ${VALUE[token]} on a quiet day` });
+    ref = VALUE[token];
+  }
+  const tens = Math.max(0, Math.floor((now - listedMs) / 600_000));
+  const age = Math.max(CLERK.ageLeast, 1 - CLERK.agePerTenMin * tens);
+  if (age < 1) steps.push({ key: "age", factor: age, note: `Unsold for ${tens * 10} minutes, so ${Math.round((1 - age) * 100)}% off` });
+  const base = ref * age;
+  const price = Math.max(1, Math.ceil(floor), Math.round(base));
+  const limits = [{ key: "floor", value: floor, binds: Math.round(base) < floor, note: `The owner won't take less than ${n1(floor)}` }];
+  return { price, base, steps, limits };
+}
+
+/// The least the clerk takes on an offer: 85% of its price, never below the owner's floor.
+export function clerkLeast(price, floor = 0) {
+  return Math.max(Math.ceil(floor), Math.ceil(price * CLERK.offerShare));
+}
+
+/// Whether the clerk should reprice a notice now asking `unit` to `price`.
+export function clerkShouldReprice(unit, price, lastMs, now) {
+  return Math.abs(price - unit) >= Math.max(1, unit * CLERK.repriceGap) && now - (lastMs ?? 0) >= CLERK.repriceEveryMs;
+}
+
+/// The clerk's working for a notice, in one short line for the board.
+export function clerkNote(why) {
+  const notes = [...why.steps.map((s) => s.note), ...(why.limits[0].binds ? [why.limits[0].note] : [])];
+  // one sentence: later parts start in lower case (names stay as they are)
+  return notes.map((n, i) => (i && /^(The|Unsold|No|Worth)\b/.test(n) ? n[0].toLowerCase() + n.slice(1) : n)).join("; ") + ".";
 }

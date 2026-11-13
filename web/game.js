@@ -6,13 +6,14 @@
 
 import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "./near-lite.js";
 import { TOKENS, NAMES, BLURB, ICONS } from "./icons.js";
-import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld, lightningAt, present } from "./world.js";
+import { W, H, HOTSPOTS, BOARD_BOX, PITCHES, walkable, drawWorld, lightningAt, present } from "./world.js";
 import { tideAt, tideHeight, tideBidFactor, nextTide, tideName, TIDE_TEXT, TIDE_PERIOD_MS, stormAt, stormLevel, stormBidFactor, STORM_TEXT, eventAt, EVENT_TEXT } from "./tide.js";
 
 const $ = (id) => document.getElementById(id);
 const RESERVE = 10n ** 23n; // 0.1 NEAR kept back for network fees, not shown as coins
 const SAVE = "tidewater.guest";
 const SPEED = 200;
+const anyPanel = () => S.shopOpen || S.boardOpen || S.benchOpen || S.pitchOpen;
 const idx = (token) => TOKENS.indexOf(token);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -237,6 +238,7 @@ function eventText(e) {
     return `The ledger stopped a deal with ${name}: ${e.reason.replace(/_/g, " ")}`;
   }
   if (e.kind === "invest") return `${name} invested ${e.coins} coins in ${merchant}`;
+  if (e.kind === "pitch") return `${name} opened a shop on a market pitch: ${e.name}`;
   if (e.kind === "order") return `Maren wants ${lot(e.token, e.qty)} for a ${e.for === "beacon" ? "beacon lens" : e.for}: ${e.unit} each until high tide`;
   if (e.kind === "auction") return `Maren is auctioning her last ${NAMES[e.token].toLowerCase()}: bids from ${e.coins} coins`;
   if (e.kind === "auction_bid") return `${name} bid ${e.coins} coins for Maren's ${NAMES[e.token].toLowerCase()}`;
@@ -592,6 +594,7 @@ function refresh(fresh = false) {
       S.shut = { maren: Boolean(market?.shops?.maren?.closed), silas: Boolean(market?.shops?.silas?.closed) };
       S.board = (market?.notices?.listings ?? []).filter((l) => l.expiresMs > Date.now());
       S.orders = market?.bids?.orders ?? [];
+      notePitches(market);
       S.auction = market?.auction?.settled === false ? market.auction : null;
       tellSellerNews();
       tellBidNews();
@@ -600,6 +603,7 @@ function refresh(fresh = false) {
       if (S.shopOpen) renderShop();
       if (S.boardOpen) renderNotices();
       if (S.benchOpen) renderBench();
+      if (S.pitchOpen) renderPitch();
     } catch (e) {
       console.warn("refresh:", e.message);
     } finally {
@@ -798,6 +802,7 @@ function interact(id) {
   if (id === "stall") openShop();
   else if (id === "dealer") openShop("silas");
   else if (id === "board") openNotices();
+  else if (h?.pitch !== undefined) openPitch(h.pitch);
   else if (id === "bench") openBench();
   else if (id === "lighthouse") lighthouse();
   else forage(h);
@@ -829,6 +834,7 @@ function sayBubble(text) {
 }
 
 function openShop(whoNow = "maren") {
+  if (S.pitchOpen) closePitch();
   shopWho = S.shopWho = whoNow;
   S.shopOpen = true;
   document.body.classList.add("shop-open"); // the bag and tide card move out from under the panel
@@ -1059,6 +1065,16 @@ function waypoint(target, p) {
     // behind the bench: round its east end to the front
     if (p.y < 586) return p.x < 1228 ? { x: 1236, y: 540 } : { x: 1236, y: 590 };
   }
+  // to the notice board from above: round its side to the front
+  if (target.then === "board" && p.y < 488 && p.x > 930 && p.x < 1020) return { x: p.x < 975 ? 926 : 1024, y: 500 };
+  // across the stall at its height: pass in front of it
+  const pastStall = (target.x < 726 && p.x > 874) || (target.x > 874 && p.x < 726);
+  if (pastStall && p.y < 412 && target.y < 440) return { x: p.x > 874 ? 880 : 720, y: 426 };
+  // from beside the workbench going west, the cottage is in the way: pass above it
+  if (p.x > 1142 && target.x < 1022 && p.y > 505 && p.y < 610) return { x: 1150, y: 500 };
+  // the notice board's legs block the way east or west at its height: go over the top
+  const across = (target.x > 1014 && p.x < 936) || (target.x < 936 && p.x > 1014);
+  if (target.then !== "board" && across && p.y > 474 && p.y < 520 && target.y < 520) return { x: p.x < 936 ? 926 : 1024, y: 466 };
   return null;
 }
 
@@ -1220,6 +1236,7 @@ const BENCH = [
 ];
 function openBench() {
   if (S.shopOpen) closeShop();
+  if (S.pitchOpen) closePitch();
   if (S.boardOpen) closeNotices();
   S.benchOpen = true;
   document.body.classList.add("bench-open");
@@ -1285,6 +1302,7 @@ function cheapestNotice(token) {
 
 function openNotices() {
   if (S.shopOpen) closeShop();
+  if (S.pitchOpen) closePitch();
   S.boardOpen = true;
   document.body.classList.add("board-open"); // the panel covers the ticker's corner
   target = null;
@@ -1454,7 +1472,8 @@ function noticeRow(l) {
   const total = l.unit * q;
   let compare;
   const merchant = cfg && (l.seller === cfg.merchantId || l.seller === cfg.dealerId);
-  if (merchant && l.why) compare = l.why;
+  if (l.clerk) compare = `<span class="clerk">Priced by the clerk: ${l.clerk.note}</span>`;
+  else if (merchant && l.why) compare = l.why;
   else if (merchant) compare = l.seller === cfg.merchantId ? "from her shelves: surplus for Silas, or for you" : "from his hold: pearls for Maren, or for you";
   else if (RAW.includes(l.token)) compare = marenBid(l.token) ? `Maren pays about ${fmt(marenBid(l.token))}` : "Maren isn't buying it right now";
   else {
@@ -1670,6 +1689,180 @@ async function answerOffer(id, answer, counter) {
   renderHud();
 }
 
+
+// ---------- player shops: a pitch, your goods, and the clerk who keeps them ----------
+// The contract keeps the shops (`open_shop`, `renew_shop`, `close_shop`,
+// `set_shop_floor`); the clerk is an agent on the server with a key that can
+// only reprice a shop's notices and answer offers on them, never below the
+// owner's floor. A shop's goods are just its owner's notices.
+let pitchAt = -1;
+let pitchKind = 1;
+const stockUp = { token: null, qty: 1, floor: 1 };
+let lastPitch = "";
+const myShop = () => (S.market?.playerShops ?? []).find((s) => mine(s.owner) && s.paidUntilMs > Date.now());
+function notePitches(market) {
+  S.pitchShops = PITCHES.map((_, i) => {
+    const s = (market?.playerShops ?? []).find((x) => x.pitch === i && x.paidUntilMs > Date.now());
+    return s ? { ...s, mine: mine(s.owner) } : null;
+  });
+  S.pitchGoods = S.pitchShops.map((s) => (s ? S.board.filter((l) => l.seller === s.owner).map((l) => l.token) : []));
+  S.pitchRent = market?.terms?.pitchRent;
+}
+/// A sensible least price to start from: what Maren pays for raw goods, half its worth for anything else.
+function defaultFloor(t) {
+  if (RAW.includes(t)) return Math.max(1, Math.floor(marenBid(t)));
+  return Math.max(1, Math.round((S.market?.value?.[t] ?? 10) * 0.5));
+}
+const floorVector = (floor) => TOKENS.map((t) => coinsToYocto(Math.max(0, Math.round(floor[t] ?? 0))).toString());
+
+function openPitch(i) {
+  if (S.shopOpen) closeShop();
+  if (S.boardOpen) closeNotices();
+  if (S.benchOpen) closeBench();
+  S.pitchOpen = true;
+  pitchAt = i;
+  document.body.classList.add("pitch-open");
+  target = null;
+  $("pitch").hidden = false;
+  $("pitch").classList.toggle("left", PITCHES[i].x > 900); // the panel on the other side, so the pitch stays in view
+  lastPitch = "";
+  renderPitch();
+  refresh();
+}
+function closePitch() {
+  S.pitchOpen = false;
+  document.body.classList.remove("pitch-open");
+  $("pitch").hidden = true;
+}
+
+function renderPitch() {
+  const m = S.market;
+  if (!m || !pv || pitchAt < 0) return;
+  const T = m.terms;
+  const kinds = m.shopKinds ?? [];
+  const shop = S.pitchShops?.[pitchAt];
+  let name;
+  let chip;
+  let intro;
+  let html = "";
+  if (!shop) {
+    name = "A market pitch";
+    chip = "to let";
+    intro = `Rent this pitch for a day and open a shop of your own. Your notices become its goods, up to ${T.shopNotices}. A clerk prices them by the market and answers offers on them, never below the least you set, and buyers pay you directly. The rent goes to the mainland's purse, which pays for Maren's exports.`;
+    const elsewhere = myShop();
+    if (!m.clerk) html = `<p class="empty">No clerk has been appointed in this village yet, so shops can't open.</p>`;
+    else if (elsewhere) html = `<p class="empty">You already keep ${elsewhere.name} at another pitch.</p>`;
+    else {
+      html = `<h4>What kind of shop</h4><div class="chips">${kinds.map((k, i) => `<button class="pick${pitchKind === i ? " on" : ""}" data-kind="${i}">${k}</button>`).join("")}</div>
+        <p class="sub">It will be called <b>${who(me)}'s ${kinds[pitchKind] ?? "Stall"}</b>.</p>
+        <div class="act"><button class="btn gold" data-rent ${coins < T.pitchRent || busy ? "disabled" : ""}>Rent it for a day: ${T.pitchRent} coins</button>${coins < T.pitchRent ? `<span class="sub">You have ${coins}.</span>` : ""}</div>`;
+    }
+  } else if (!shop.mine) {
+    name = shop.name;
+    chip = "kept by the clerk";
+    intro = `${who(shop.owner)}'s shop. The clerk prices the goods by the market and answers offers, never below ${who(shop.owner)}'s least price for each. Your coins go straight to ${who(shop.owner)}.`;
+    const goods = S.board.filter((l) => l.seller === shop.owner && live(l));
+    html = goods.length ? goods.map(noticeRow).join("") : `<p class="empty">Nothing on the table right now.</p>`;
+    html += `<p class="sub">${shop.sales} ${shop.sales === 1 ? "sale" : "sales"} so far.</p>`;
+  } else {
+    name = `Your ${kinds[shop.kind] ?? "Stall"}`;
+    chip = `rent paid for ${hhmm(shop.paidUntilMs - Date.now())}`;
+    intro = `Put goods on the table and set the least you'll take for each. The clerk prices them by the market, starting high and coming down 5% for every ten minutes they don't sell, and answers offers for you. It can't take your goods or your coins.`;
+    const canRenew = shop.paidUntilMs + T.pitchDayMs <= Date.now() + 2 * T.pitchDayMs;
+    html = `<div class="stats"><span><b>${shop.sales}</b> ${shop.sales === 1 ? "sale" : "sales"}</span><span>takings <b>${fmt(shop.takings)}</b> coins</span><span>the clerk repriced <b>${shop.reprices}</b> ${shop.reprices === 1 ? "time" : "times"}</span></div>
+      <div class="act"><button class="btn small" data-renew ${!canRenew || coins < T.pitchRent || busy ? "disabled" : ""} title="${canRenew ? "" : "Paid two days ahead already"}">Another day: ${T.pitchRent} coins</button><button class="btn small plain" data-close-shop ${busy ? "disabled" : ""}>Give up the pitch</button></div>`;
+    const goods = S.board.filter((l) => mine(l.seller));
+    html += `<h4>On the table (${goods.length} of ${T.shopNotices})</h4>` + (goods.length ? goods.map((l) => noticeRow(l) + `<p class="sub floor-line">The least you'll take for ${MANY[l.token]}: ${fmt(shop.floor[l.token] ?? 0)} each.</p>`).join("") : `<p class="empty">Nothing yet. Put something out below.</p>`);
+    const bag = TOKENS.filter((t) => pv.items[idx(t)] > 0);
+    if (stockUp.token && !bag.includes(stockUp.token)) stockUp.token = null;
+    if (!stockUp.token && bag.length) pickStock(bag[0], shop);
+    html += `<h4>Put on the table</h4><div class="chips">${bag.map((t) => `<button class="pick${stockUp.token === t ? " on" : ""}" data-stock="${t}" title="${NAMES[t]}">${ICONS[t]}<b>${pv.items[idx(t)]}</b></button>`).join("") || `<span class="sub">Your bag is empty.</span>`}</div>`;
+    if (stockUp.token) {
+      const have = pv.items[idx(stockUp.token)];
+      stockUp.qty = Math.max(1, Math.min(have, stockUp.qty));
+      const ask = Math.max(stockUp.floor, m.clerkSuggest?.[stockUp.token] ?? stockUp.floor);
+      html += `<div class="act"><span class="qty"><button data-sq="-1">−</button>${stockUp.qty}<button data-sq="1">+</button></span><span>never below</span><span class="qty"><button data-sf="-1">−</button>${stockUp.floor}<button data-sf="1">+</button></span><span>each</span>
+        <button class="btn small" data-put ${goods.length >= T.shopNotices || busy ? "disabled" : ""}>Put it out</button></div>
+        <p class="sub">The clerk would ask about ${ask} each today. ${RAW.includes(stockUp.token) ? `Maren pays about ${fmt(marenBid(stockUp.token))}.` : marenAsk(stockUp.token) ? `Maren asks ${marenAsk(stockUp.token)}.` : "Maren has none."}</p>`;
+    }
+  }
+  $("pitch-name").textContent = name;
+  $("pitch-chip").textContent = chip;
+  $("pitch-intro").textContent = intro;
+  if (html !== lastPitch) {
+    $("pitch-body").innerHTML = html;
+    lastPitch = html;
+  }
+}
+function pickStock(token, shop) {
+  stockUp.token = token;
+  stockUp.qty = RAW.includes(token) ? pv.items[idx(token)] : 1;
+  stockUp.floor = Math.round(shop?.floor?.[token] || defaultFloor(token));
+}
+
+async function pitchTx(text, method, args, deposit, label) {
+  const res = await boardTx(text, method, args, deposit, label);
+  lastPitch = "";
+  renderPitch();
+  return res;
+}
+
+$("pitch-close").onclick = closePitch;
+$("pitch").addEventListener("click", async (e) => {
+  const b = e.target.closest("button");
+  if (!b || b.disabled) return;
+  const d = b.dataset;
+  const T = S.market?.terms;
+  const shop = S.pitchShops?.[pitchAt];
+  if (d.kind) pitchKind = Number(d.kind);
+  else if (d.rent !== undefined) {
+    const floor = Object.fromEntries(TOKENS.map((t) => [t, defaultFloor(t)]));
+    const r = await pitchTx("Renting the pitch", "open_shop", { kind: pitchKind, floor: floorVector(floor) }, coinsToYocto(T.pitchRent), `Rented a pitch for ${T.pitchRent}`);
+    if (!r) return;
+    coins = Math.max(0, coins - T.pitchRent);
+    sfx.coin();
+    toast(`Your shop is open for a day. Put goods on the table: the clerk will price them and mind them while you're away.`, false, 8000);
+    renderHud();
+    return;
+  } else if (d.renew !== undefined) {
+    const r = await pitchTx("Paying the rent", "renew_shop", {}, coinsToYocto(T.pitchRent), `Paid another day's rent`);
+    if (r) coins = Math.max(0, coins - T.pitchRent);
+    if (r) toast("Rent paid for another day.");
+    return;
+  } else if (d.closeShop !== undefined) {
+    const r = await pitchTx("Packing up", "close_shop", {}, 0n, "Gave up the pitch");
+    if (r) toast("You gave up the pitch. Your notices stay on the board as ordinary notices.", false, 6000);
+    return;
+  } else if (d.stock) pickStock(d.stock, shop);
+  else if (d.sq) stockUp.qty += Number(d.sq);
+  else if (d.sf) stockUp.floor = Math.max(1, stockUp.floor + Number(d.sf));
+  else if (d.put !== undefined) return putOut(shop);
+  else return noticeClick(e);
+  lastPitch = "";
+  renderPitch();
+});
+
+async function putOut(shop) {
+  const { token, qty, floor } = stockUp;
+  if (!token || !shop) return;
+  if (Math.round(shop.floor[token] ?? 0) !== floor) {
+    const r = await pitchTx("Telling the clerk your price", "set_shop_floor", { floor: floorVector({ ...shop.floor, [token]: floor }) }, 0n, `Never below ${floor} for ${NAMES[token].toLowerCase()}`);
+    if (!r) return;
+    shop.floor[token] = floor;
+  }
+  const ask = Math.max(floor, S.market?.clerkSuggest?.[token] ?? floor);
+  const r = await pitchTx("Laying it out", "list_item", { token_id: token, qty, unit_price: coinsToYocto(ask).toString() }, 0n, `Put ${lot(token, qty)} on the table`);
+  if (!r) return;
+  pv.items[idx(token)] -= qty;
+  S.market.notices.listings.push(toNotice(r.value));
+  stockUp.token = null;
+  sfx.found();
+  toast(`${lot(token, qty)[0].toUpperCase() + lot(token, qty).slice(1)} on the table at ${ask} each. The clerk takes it from here, never below ${floor}.`, false, 7000);
+  renderHud();
+  lastPitch = "";
+  renderPitch();
+}
+
 /// When something of yours sells off the board while you are elsewhere, say so.
 let salesSeen = null;
 function tellSellerNews() {
@@ -1720,6 +1913,7 @@ addEventListener("keydown", (e) => {
     else if (S.shopOpen) closeShop();
     else if (S.boardOpen) closeNotices();
     else if (S.benchOpen) closeBench();
+    else if (S.pitchOpen) closePitch();
     return;
   }
   if (typingInField() || !started) return;
@@ -1730,7 +1924,7 @@ addEventListener("keydown", (e) => {
   }
   if ((k === "e" || k === " " || k === "enter") && !e.repeat) {
     e.preventDefault();
-    if (S.shopOpen || S.boardOpen || S.benchOpen) return;
+    if (anyPanel()) return;
     if (S.near) interact(S.near);
   }
 });
@@ -1742,7 +1936,7 @@ let touch = matchMedia("(pointer: coarse)").matches;
 addEventListener("pointerdown", (e) => e.pointerType === "touch" && (touch = true), { capture: true });
 let useShown = null;
 function updateUseButton() {
-  const h = touch && started && !busy && !S.shopOpen && !S.boardOpen && !S.benchOpen && S.near ? HOTSPOTS.find((x) => x.id === S.near) : null;
+  const h = touch && started && !busy && !anyPanel() && S.near ? HOTSPOTS.find((x) => x.id === S.near) : null;
   if (h === useShown) return;
   useShown = h;
   $("use").hidden = !h;
@@ -1757,6 +1951,7 @@ canvas.addEventListener("pointerdown", (e) => {
   if (S.shopOpen) closeShop();
   if (S.boardOpen) closeNotices();
   if (S.benchOpen) closeBench();
+  if (S.pitchOpen) closePitch();
   const rect = canvas.getBoundingClientRect();
   const x = ((e.clientX - rect.left) * W) / rect.width;
   const y = ((e.clientY - rect.top) * H) / rect.height;
@@ -1796,7 +1991,8 @@ $("ntab-pin").onclick = () => {
   ntab = "pin";
   renderNotices();
 };
-$("notices").addEventListener("click", (e) => {
+$("notices").addEventListener("click", (e) => noticeClick(e));
+function noticeClick(e) {
   const b = e.target.closest("button");
   if (!b || b.disabled) return;
   const d = b.dataset;
@@ -1835,8 +2031,9 @@ $("notices").addEventListener("click", (e) => {
   } else if (d.counterGo) return answerOffer(Number(d.counterGo), "counter", counterEdit.price);
   else return;
   lastNotices = "";
-  renderNotices();
-});
+  if (S.boardOpen) renderNotices();
+  if (S.pitchOpen) renderPitch();
+}
 $("notices").addEventListener("input", (e) => {
   if (e.target.id !== "pin-price") return;
   const v = Math.round(Number(e.target.value));
@@ -1952,7 +2149,7 @@ function frame(now) {
   S.storm.level = stormLevel(nowMs());
   updateAmbient(t);
 
-  if (started && !busy && !S.shopOpen && !S.boardOpen && !S.benchOpen) {
+  if (started && !busy && !anyPanel()) {
     let dx = (keys.has("d") || keys.has("arrowright") ? 1 : 0) - (keys.has("a") || keys.has("arrowleft") ? 1 : 0);
     let dy = (keys.has("s") || keys.has("arrowdown") ? 1 : 0) - (keys.has("w") || keys.has("arrowup") ? 1 : 0);
     if (dx || dy) target = null;

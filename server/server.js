@@ -16,7 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
-import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand, repMood, TERMS, orderPlan, staleOrders, orderWhy, auctionPlan, leastFor, offerAnswer } from "./merchant.js";
+import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand, repMood, TERMS, orderPlan, staleOrders, orderWhy, auctionPlan, leastFor, offerAnswer, SHOP_KINDS, clerkWhy, clerkLeast, clerkShouldReprice, clerkNote } from "./merchant.js";
 import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
 import { tideAt, tideBidFactor, stormAt, stormBidFactor, eventAt } from "../web/tide.js";
 
@@ -53,6 +53,9 @@ const merchantKey = await loadKey(need("MERCHANT_KEY"));
 // Silas, the pearl and ore dealer, is optional: without these the shop runs as before.
 const DEALER_ID = process.env.DEALER_ID || null;
 const dealerKey = process.env.DEALER_KEY ? await loadKey(process.env.DEALER_KEY) : null;
+// The clerk who keeps players' shops is optional too (scripts/add-clerk.sh).
+const CLERK_ID = process.env.CLERK_ID || null;
+const clerkKey = process.env.CLERK_KEY ? await loadKey(process.env.CLERK_KEY) : null;
 const sponsorKey = await loadKey(need("SPONSOR_KEY"));
 const voice = await initVoice();
 
@@ -79,6 +82,7 @@ const logs = {
   shopNews: [], // when a merchant shut up shop or opened again
   bids: [], // Maren's wanted orders and players' offers on notices
   bidNews: [], // auctions and orders, for the ticker
+  playerShops: [], // players' shops on the village's pitches
   seen: { trades: -1, blocked: -1, beacons: "", board: -1, boardSales: -1, dealerTrades: -1, dealerBlocked: -1, maren: "", silas: "", loans: -1 },
 };
 /// The contract's shop view, in coins.
@@ -109,6 +113,18 @@ const toBid = (b) => ({
   placedMs: b.placed_ms,
   expiresMs: b.expires_ms,
 });
+const toPlayerShop = (s) => ({
+  owner: s.owner,
+  kind: s.kind,
+  name: `${whoName(s.owner)}'s ${SHOP_KINDS[s.kind] ?? "Stall"}`,
+  pitch: s.pitch,
+  floor: byToken(s.floor, yoctoToCoins),
+  openedMs: s.opened_ms,
+  paidUntilMs: s.paid_until_ms,
+  sales: s.sales,
+  takings: yoctoToCoins(s.takings),
+  reprices: s.reprices,
+});
 const toAuction = (a) =>
   a && { id: a.id, token: a.token_id, reserve: yoctoToCoins(a.reserve), startedMs: a.started_ms, endsMs: a.ends_ms, bids: a.bids, top: a.top ? toBid(a.top) : null, settled: a.settled };
 const toListing = (l) => ({
@@ -132,10 +148,12 @@ async function refreshLogs(mv, dv) {
   if (mv.board_version !== undefined && mv.board_version !== logs.seen.board) {
     // (orders and offers move the board's version too)
     const bids = mv.bid_count !== undefined ? near.view(CONTRACT, "get_bids") : Promise.resolve([]);
+    const shops = mv.shop_count !== undefined ? near.view(CONTRACT, "get_player_shops") : Promise.resolve([]);
     jobs.push(
-      Promise.all([near.view(CONTRACT, "get_listings"), bids]).then(([l, b]) => {
+      Promise.all([near.view(CONTRACT, "get_listings"), bids, shops]).then(([l, b, s]) => {
         logs.listings = l.map(toListing);
         logs.bids = b.map(toBid);
+        logs.playerShops = s.map(toPlayerShop);
         for (const o of logs.bids) if (o.kind === "order") orderIds.add(o.id);
         logs.seen.board = mv.board_version;
       }),
@@ -202,6 +220,7 @@ function feed() {
     ...logs.shopNews,
     ...logs.bids.filter((b) => b.kind === "order").map((o) => ({ kind: "order", player: MERCHANT_ID, token: o.token, qty: o.qty, unit: Math.round(o.unit), for: o.reason, at: o.placedMs })),
     ...logs.bidNews,
+    ...logs.playerShops.map((s) => ({ kind: "pitch", player: s.owner, name: s.name, at: s.openedMs })),
   ];
   return items.sort((a, b) => b.at - a.at).slice(0, 20);
 }
@@ -278,6 +297,7 @@ async function getMarket(fresh = false) {
     insurance: mv.insurance && { premiums: yoctoToCoins(mv.insurance.premiums), payouts: yoctoToCoins(mv.insurance.payouts), coversSold: mv.insurance.covers_sold, claimsPaid: mv.insurance.claims_paid },
     loansOut: mv.loans_out ?? 0,
     auction: toAuction(mv.auction),
+    clerkId: mv.clerk_id ?? null,
     dealer: dv && {
       id: dv.account_id,
       stock: byToken(dv.stock),
@@ -357,6 +377,49 @@ const dealerCall = (method, args) =>
     cache.at = 0;
   });
 /// Silas can trade only when he is in town (on-chain) and this server holds his key.
+const clerkCall = (method, args) =>
+  near.send(CLERK_ID, clerkKey, CONTRACT, [actions.functionCall(method, args, 30n * TGAS)]).finally(() => {
+    cache.at = 0;
+  });
+/// The clerk works when the contract has appointed it and this server holds its key.
+const clerkHere = (market) => Boolean(clerkKey && market.clerkId && market.clerkId === CLERK_ID);
+// The clerk's working for each shop notice, by listing id (for the board's "why").
+const clerkReasons = new Map();
+const repricedAt = new Map();
+const liveShops = () => logs.playerShops.filter((s) => Date.now() <= s.paidUntilMs);
+
+/// The clerk's round: price every shop notice by the rules in merchant.js
+/// (within the owner's floor; the contract checks), and answer offers on them.
+async function clerkTick(market) {
+  if (!clerkHere(market)) return;
+  for (const shop of liveShops()) {
+    const goods = logs.listings.filter((l) => l.seller === shop.owner && Date.now() <= l.expiresMs);
+    for (const l of goods) {
+      const floor = shop.floor[l.token] ?? 0;
+      const why = clerkWhy(market, { token: l.token, floor, listedMs: l.listedMs }, Date.now());
+      clerkReasons.set(l.id, why);
+      if (!clerkShouldReprice(l.unit, why.price, repricedAt.get(l.id), Date.now())) continue;
+      repricedAt.set(l.id, Date.now());
+      const r = await tryCall("reprice", clerkCall("clerk_reprice", { listing_id: l.id, unit_price: coinsToYoctoStr(why.price) }));
+      if (r?.value.status === "listed") console.log(`  · ${shop.name}: the clerk priced ${lot(l.token, l.qty)} at ${why.price} each`);
+      else if (r) console.log(`  · the ledger refused the clerk: ${r.value.reason}`);
+    }
+    for (const b of logs.bids.filter((x) => x.kind === "offer" && !x.counter)) {
+      const l = goods.find((x) => x.id === b.on);
+      if (!l) continue;
+      const floor = shop.floor[l.token] ?? 0;
+      const price = clerkReasons.get(l.id)?.price ?? l.unit;
+      const a = offerAnswer({ offer: b.unit, ask: l.unit, least: clerkLeast(price, floor) });
+      let r = await tryCall("clerk answer", clerkCall("answer_offer", { id: b.id, answer: a.answer, counter: a.counter ? coinsToYoctoStr(a.counter) : null }));
+      if (r?.value.status === "blocked") r = await tryCall("clerk answer", clerkCall("answer_offer", { id: b.id, answer: "decline", counter: null }));
+      const offer = `${whoName(b.bidder)}'s offer of ${n0(b.unit)} each for ${lot(l.token, b.qty)}`;
+      if (r?.value.status === "sold") addNews(`The clerk at ${shop.name} took ${offer}.`);
+      else if (r?.value.status === "countered") addNews(`The clerk at ${shop.name} countered ${offer}: ${a.counter} each.`);
+      else if (r?.value.status === "declined") addNews(`The clerk at ${shop.name} turned down ${offer}.`);
+    }
+  }
+}
+
 const dealerHere = (market) => Boolean(market.dealer && dealerKey && market.dealer.id === DEALER_ID);
 
 // Why each merchant pinned each of their notices, by listing id, for the board.
@@ -408,6 +471,8 @@ async function workshopTick() {
       await tryCall("settle", merchantCall("settle_auction", {}));
       market = await getMarket(true);
     }
+    await clerkTick(market); // players' shops are kept whether Maren is open or not
+    if (cache.at === 0) market = await getMarket(true);
     if (market.shop?.closed) {
       // her stall is shut: no notices, no workshop, no buying; Silas may still trade
       if (silasIn) await dealerTick(market);
@@ -538,6 +603,7 @@ async function boardTick(market) {
 function whoName(account) {
   if (account === MERCHANT_ID) return "Maren";
   if (account === DEALER_ID) return "Silas";
+  if (account === CLERK_ID) return "the clerk";
   const g = account.match(/^g([0-9a-f]{4})[0-9a-f]*\./);
   return g ? `Guest ${g[1]}` : account.split(".")[0];
 }
@@ -782,7 +848,7 @@ async function route(req, res) {
   };
   try {
     if (url.pathname === "/api/config") {
-      return send(200, { network: "testnet", contract: CONTRACT, merchantId: MERCHANT_ID, dealerId: DEALER_ID, rpcUrls: RPC_URLS, guestNear: GUEST_NEAR, explorer: "https://testnet.nearblocks.io", voice });
+      return send(200, { network: "testnet", contract: CONTRACT, merchantId: MERCHANT_ID, dealerId: DEALER_ID, clerkId: CLERK_ID, rpcUrls: RPC_URLS, guestNear: GUEST_NEAR, explorer: "https://testnet.nearblocks.io", voice });
     }
     if (url.pathname === "/api/market") {
       const market = await getMarket(url.searchParams.has("fresh")); // "fresh": right after the player changed something
@@ -803,12 +869,24 @@ async function route(req, res) {
         history,
         players: market.playerCount,
         deals: market.tradeCount,
-        notices: { listings: logs.listings.map((l) => (noticeWhy.has(l.id) ? { ...l, why: noticeWhy.get(l.id) } : l)), sales: logs.boardSales.slice(0, 5).map((b) => ({ ...b, maren: b.buyer === MERCHANT_ID })) },
+        notices: {
+          listings: logs.listings.map((l) => {
+            const kept = clerkReasons.get(l.id);
+            if (kept && liveShops().some((s) => s.owner === l.seller)) return { ...l, clerk: { price: kept.price, note: clerkNote(kept) } };
+            return noticeWhy.has(l.id) ? { ...l, why: noticeWhy.get(l.id) } : l;
+          }),
+          sales: logs.boardSales.slice(0, 5).map((b) => ({ ...b, maren: b.buyer === MERCHANT_ID })),
+        },
         bids: {
           orders: logs.bids.filter((b) => b.kind === "order").map((o) => ({ ...o, why: orderReasons.get(o.id) ?? orderWhy({ token: o.token, qty: o.qty, for: o.reason }) })),
           offers: logs.bids.filter((b) => b.kind === "offer"),
         },
         auction: market.auction,
+        playerShops: liveShops(),
+        shopKinds: SHOP_KINDS,
+        clerk: clerkHere(market),
+        // what the clerk would ask for a fresh notice of each item (a starting price for a shop's goods)
+        clerkSuggest: Object.fromEntries(TOKENS.map((t) => [t, clerkWhy(market, { token: t, listedMs: Date.now() }, Date.now()).price])),
         value: VALUE,
         dealer: dealerHere(market)
           ? {
