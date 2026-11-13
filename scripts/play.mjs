@@ -208,8 +208,10 @@ else {
     const pick = (await call("player_craft", { token_id: "pickaxe" })).value;
     say("me", `made a pickaxe from 2 driftwood and the rope  [energy ${pick.energy_left}]`);
     const after = await settled((q) => have(q, "pickaxe") !== have(before, "pickaxe"));
-    check(have(after, "pickaxe") === have(before, "pickaxe") + 1 && have(after, "rope") === have(before, "rope") && pick.energy_left === rope.energy_left - 2,
-      "made my own pickaxe (2 energy), so now I own one more");
+    // (2 energy; one point may come back between the two calls, as energy refills)
+    const spent = rope.energy_left - pick.energy_left;
+    check(have(after, "pickaxe") === have(before, "pickaxe") + 1 && have(after, "rope") === have(before, "rope") && (spent === 2 || spent === 1),
+      `made my own pickaxe (2 energy), so now I own one more [pickaxes ${have(before, "pickaxe")} → ${have(after, "pickaxe")}, rope ${have(before, "rope")} → ${have(after, "rope")}, energy ${rope.energy_left} → ${pick.energy_left}]`);
     const boat = await call("player_craft", { token_id: "boat" }).then(() => "made", (e) => e.message);
     check(/Maren builds boats/.test(boat), "the workbench won't make a boat: that's Maren's work");
   }
