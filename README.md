@@ -65,7 +65,39 @@ node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the b
 4. **Trade with other players** on the notice board. A spare pickaxe, a boat you no longer need, ore at a better price than Maren pays: pin it, and whoever buys it pays you directly. Maren doesn't buy tools back at her stall, so the board is the only place to sell a used one.
 5. **Light the lighthouse** with the beacon lens. Your time goes on the keepers' board. Your boat and pickaxe can then go on the board for the next newcomer.
 
+The same loop at four timescales. The full version, with the yield tables and the prices behind each choice, is in [`docs/GAME_LOOP.md`](docs/GAME_LOOP.md).
+
+| Every | You | Because |
+|---|---|---|
+| **30 seconds** | make a trip or two: forage, walk to Maren, Silas or the board, sell or haggle. Sell now, or hold? | Energy: 12 at most, 1 back every 6 s, so about 5 points (five shore trips, two cliff runs or one reef trip) every 30 s |
+| **5 minutes** | gather at low water, sell kelp and pearls at high water; pick Maren or Silas by how full his hold is; check the board | Half a tide. Each tide lasts 10 minutes in four parts of 2½ minutes, and every third one is a spring tide |
+| **30 minutes** | hold pearls back before the storm, comb the wrack during it, sell pearls high while the reef is shut | One 4-minute storm per half hour, forecast on the tide card |
+| **session** | pickaxe (about 60 coins), then the cliffs; boat (about 240), then the reef; beacon lens (about 600), then the lighthouse | A guest starts with about 29 coins; prices move with what every player has bought and sold |
+
 ![The lighthouse, relit](docs/lighthouse.jpg)
+
+## The brief, line by line
+
+The track's brief, and where each part of it is in this repo. "Partly" and "Not yet" are what they say; the work planned for them is listed at the end of [`docs/GAME_LOOP.md`](docs/GAME_LOOP.md).
+
+| The brief asks for | Status | How, and where |
+|---|---|---|
+| NPC merchants with their own wallets | Yes | Maren (`maren.…`) and Silas (`dealer.…`) are separate NEAR accounts, each with its own function-call key. Each has a treasury, stock, average costs, profit and guard rails in the contract (`Market`, `Dealer` in [`lib.rs`](contract/src/lib.rs)), and the server signs their deals with their own keys (`merchantCall`, `dealerCall` in [`server.js`](server/server.js)). |
+| ... and their own inventory | Yes | Each merchant's stock is kept in the contract under its own name (`get_market`, `get_dealer`). Maren's workshop crafts her tools from the goods players sold her. |
+| Prices set from the merchant's stock | Yes | `unitAsk`, `unitBid` and `dealerBid` in [`merchant.js`](server/merchant.js): stock, what the goods cost her, her treasury, and the tide and storm. |
+| ... and from recent demand | Partly | Demand moves her prices only through her stock: what players buy empties the shelf, and what they sell fills it. There is no separate term for how much has traded recently yet. |
+| Flood the market with iron and iron gets cheap | Yes, for ore | When ore on her shelf goes from 4 to 8, her bid falls from about 19 coins to 10 (`unitBid`). Her workshop exports the surplus to the mainland (`planWork`), and the price recovers. |
+| A broke merchant closes its shop until someone invests | Not yet | As her treasury runs low she pays less (down to 35% of her usual bid) and asks 8% less, and the contract refuses any deal she cannot pay for (`treasury_too_low`). She never closes, and only the owner can fund her (`fund_treasury`). |
+| Player-owned markets | Partly | Players run the notice board: escrowed notices, and the buyer's NEAR goes to the seller in the same transaction (`list_item`, `buy_listing` in [`lib.rs`](contract/src/lib.rs)). Maren and Silas trade there too. Players cannot own a stake in a merchant yet. |
+| Economies that evolve without a dev patch | Yes | The tide (`tide_at`) and storms (`storm_at`) run on the block clock. Maren's workshop and Silas's shipping run on their own ([`server.js`](server/server.js)). Two agents compete for the same goods. |
+| Items are NEP-245 multi tokens in one contract | Yes, the core | All 8 items are in one contract: `mt_balance_of`, `mt_batch_balance_of`, `mt_supply`, `mt_transfer`, `mt_batch_transfer` and the standard events. There are no approvals, no `mt_transfer_call` and no metadata. |
+| Social or email login | Not yet | Guest accounts only (see "Limits, honestly"). |
+| No seed phrases, wallet popups or gas prompts | Yes | **Step ashore** creates a sponsored guest account (`/api/guest` in [`server.js`](server/server.js)), and its key, kept in the browser, signs every action silently ([`near-lite.js`](web/near-lite.js)). |
+| Merchant pricing rules in one readable file | Mostly | [`server/merchant.js`](server/merchant.js), except the tide and storm factors, which are in [`web/tide.js`](web/tide.js) so the browser can draw them. |
+| A merchant's reasoning in a tooltip | Partly | The stall shows short notes ("Low tide: she pays less", "Silas pays about 24"), and a price line for each item whose arrow shows, on hover, what it cost two minutes ago. There is no full breakdown of her reasoning yet. |
+| Fast-forward a week of trading in a minute | Not yet | |
+| The game loop on paper: every 30 seconds, 5 minutes, session | Yes | Above, and in full in [`docs/GAME_LOOP.md`](docs/GAME_LOOP.md). It was written up after the code, as a description of the design. |
+| Bonus: players never notice the chain | Yes | There is no wallet to install and no fee prompt. The chain is behind the optional **Ledger** button. |
 
 ## Why the economy is real
 
@@ -127,6 +159,7 @@ Her lines are written sentences picked at random ([`server/voice.js`](server/voi
 | `server/server.js` | Runs Maren (haggling, posting her quotes with her key, the workshop), creates guest accounts, serves the game. Passes on the contract's trade log and keepers' board, and remembers recent prices for the price lines. |
 | `server/merchant.js` | Her pricing, her bargaining and what she buys off the notice board, and Silas's pricing and shipping, as pure functions. |
 | `web/` | The game: `game.js` (logic), `world.js` (the village, drawn in code), `tide.js` (the tide clock, shared with the server), `near-lite.js` (transaction signing in ~350 lines, shared with the server and the bot). |
+| `docs/GAME_LOOP.md` | The game loop at every timescale, with the numbers behind each choice. |
 | `scripts/` | `bootstrap.sh` (set up your own market), `upgrade.sh` (deploy a new contract to an existing market, keeping its state), `add-dealer.sh` (bring Silas to an existing market), `play.mjs` (the bot), `test.sh`, `build.sh`. |
 
 ## Tests
