@@ -6,7 +6,7 @@
 
 import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "./near-lite.js";
 import { TOKENS, NAMES, BLURB, ICONS } from "./icons.js";
-import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld, lightningAt } from "./world.js";
+import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld, lightningAt, present } from "./world.js";
 import { tideAt, tideHeight, tideBidFactor, nextTide, tideName, TIDE_TEXT, TIDE_PERIOD_MS, stormAt, stormLevel, stormBidFactor, STORM_TEXT } from "./tide.js";
 
 const $ = (id) => document.getElementById(id);
@@ -219,7 +219,8 @@ function ago(ms) {
 }
 function eventText(e) {
   const name = who(e.player);
-  if (e.kind === "trade") return `${name} ${e.did} ${lot(e.token, e.qty)} ${e.did === "sold" ? "to" : "from"} Maren for ${e.coins} coins`;
+  const merchant = e.merchant === "silas" ? "Silas" : "Maren";
+  if (e.kind === "trade") return `${name} ${e.did} ${lot(e.token, e.qty)} ${e.did === "sold" ? "to" : "from"} ${merchant} for ${e.coins} coins`;
   if (e.kind === "board_sale") {
     const buyer = e.maren ? "Maren" : name;
     if (mine(e.seller)) return `${buyer} bought your ${yourLot(e.token, e.qty)} off the notice board for ${e.coins} coins`;
@@ -228,7 +229,7 @@ function eventText(e) {
   if (e.kind === "listed") return `${name} pinned ${lot(e.token, e.qty)} on the notice board at ${fmt(e.unit)} each`;
   if (e.kind === "refused") {
     // a price outside her floors and ceilings only comes from someone trying to trick her
-    if (/floor|ceiling/.test(e.reason)) return `${name} tried to talk Maren into a silly deal. The ledger refused it.`;
+    if (/floor|ceiling/.test(e.reason)) return `${name} tried to talk ${merchant} into a silly deal. The ledger refused it.`;
     return `The ledger stopped a deal with ${name}: ${e.reason.replace(/_/g, " ")}`;
   }
   return `${name} relit the lighthouse!`;
@@ -403,9 +404,9 @@ function renderBoard(m) {
 }
 
 // A little line of how a price has moved lately (the server keeps the last few minutes).
-function trend(token, upIsGood) {
+function trend(token, upIsGood, dealer = false) {
   const h = S.market?.history;
-  const line = h?.prices?.[token];
+  const line = dealer ? h?.dealer?.[token] : h?.prices?.[token];
   if (!line || line.length < 2) return "";
   const vals = line.filter((v) => v != null);
   if (!vals.length) return "";
@@ -494,6 +495,7 @@ function refresh(fresh = false) {
       else setTimeout(refresh, settling ? 2600 : 1500); // (a brand-new account can also take a moment to show up)
       if (market && market !== S.market && market.now) clockSkew = market.now - Date.now();
       S.market = market;
+      S.dealer = Boolean(market?.dealer);
       S.board = (market?.notices?.listings ?? []).filter((l) => l.expiresMs > Date.now());
       tellSellerNews();
       renderHud();
@@ -654,12 +656,17 @@ function interact(id) {
   if (busy || !started) return;
   const h = HOTSPOTS.find((s) => s.id === id);
   if (id === "stall") openShop();
+  else if (id === "dealer") openShop("silas");
   else if (id === "board") openNotices();
   else if (id === "lighthouse") lighthouse();
   else forage(h);
 }
 
-// ---------- Maren's stall ----------
+// ---------- the stall panel: Maren's stall, or Silas's pitch ----------
+const MAREN_FACE = `<svg viewBox="0 0 56 56" width="56" height="56"><circle cx="28" cy="28" r="28" fill="#cfe4e0"/><circle cx="28" cy="11" r="7" fill="#d8d8d2"/><path d="M8 56c0-13 9-19 20-19s20 6 20 19z" fill="#2f7f86"/><path d="M14 44l14 10 14-10-3-5H17z" fill="#e3b24f"/><circle cx="28" cy="26" r="13" fill="#e9bf9b"/><path d="M15 25a13 13 0 0 1 26 0c-5-6-21-6-26 0z" fill="#d8d8d2"/><circle cx="23.5" cy="27" r="1.6" fill="#3b2f2a"/><circle cx="32.5" cy="27" r="1.6" fill="#3b2f2a"/><path d="M23 32q5 4 10 0" fill="none" stroke="#8a4c3a" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+const SILAS_FACE = `<svg viewBox="0 0 56 56" width="56" height="56"><circle cx="28" cy="28" r="28" fill="#d9dce8"/><path d="M8 56c0-13 9-19 20-19s20 6 20 19z" fill="#3d4a6b"/><path d="M22 37l6 9 6-9z" fill="#b8432f"/><circle cx="28" cy="27" r="12" fill="#d9a77f"/><path d="M17 29a11 11 0 0 0 22 0c-3 6-19 6-22 0z" fill="#4a3426"/><circle cx="23.5" cy="25" r="1.6" fill="#2a211c"/><circle cx="32.5" cy="25" r="1.6" fill="#2a211c"/><rect x="13" y="14" width="30" height="3" fill="#23262e"/><rect x="18" y="1" width="20" height="14" rx="2" fill="#23262e"/><rect x="18" y="11" width="20" height="3" fill="#b8432f"/></svg>`;
+let shopWho = "maren"; // who is behind the counter
+const silasHere = () => shopWho === "silas";
 let session = null;
 let tab = "buy";
 let talking = false;
@@ -680,13 +687,34 @@ function sayBubble(text) {
   sfx.talk();
 }
 
-function openShop() {
+function openShop(whoNow = "maren") {
+  shopWho = S.shopWho = whoNow;
   S.shopOpen = true;
   document.body.classList.add("shop-open"); // the bag and tide card move out from under the panel
   target = null;
   $("shop").hidden = false;
   $("stamp").hidden = true;
   session = null;
+  lastList = "";
+  const silas = silasHere();
+  $("shop-name").textContent = silas ? "Silas" : "Maren";
+  $("shop-role").textContent = silas ? "pearl & ore dealer" : "shopkeeper";
+  $("portrait").innerHTML = silas ? SILAS_FACE : MAREN_FACE;
+  $("tab-buy").hidden = silas;
+  $("tab-sell").textContent = silas ? "Sell to Silas" : "Sell to Maren";
+  $("say").placeholder = silas ? "Say something to him…" : "Say something to her…";
+  if (silas) {
+    sayBubble(
+      S.storm.active
+        ? "Not in this weather. My boat's battened down until the storm passes."
+        : pv.items[idx("pearl")] + pv.items[idx("ore")] > 0
+          ? "Ore and pearls, city prices. I can see you've got some."
+          : "Silas, buying ore and pearls for the city. Come back when you've got some.",
+    );
+    tab = "sell";
+    renderShop();
+    return refresh();
+  }
   const weather = S.storm.active
     ? "Get in out of the rain! What'll it be?"
     : S.tide.phase === "low"
@@ -710,16 +738,38 @@ let lastList = "";
 function renderShop() {
   const m = S.market;
   if (!m) return;
-  $("mood").textContent = m.mood;
-  $("mood").className = "chip " + m.mood;
-  $("her-purse").textContent = m.treasury + " coins";
-  $("her-profit").textContent = m.profit + " coins";
+  const silas = silasHere() && m.dealer;
+  const books = silas ? m.dealer : m;
+  $("mood").textContent = books.mood;
+  $("mood").className = "chip " + books.mood;
+  $("books-whose").textContent = silas ? "His" : "Her";
+  $("her-purse").textContent = books.treasury + " coins";
+  $("her-profit").textContent = books.profit + " coins";
   $("news").innerHTML = m.news.slice(0, 3).map((n) => `<li>${n.text}</li>`).join("");
   $("tab-buy").classList.toggle("on", tab === "buy");
   $("tab-sell").classList.toggle("on", tab === "sell");
 
   let html = "";
-  if (tab === "buy") {
+  if (silas) {
+    // Silas only buys ore and pearls; Maren's offer is shown beside his, so players can play them off
+    for (const b of m.dealer.board) {
+      const have = pv.items[idx(b.token)];
+      const qty = Math.max(1, Math.min(have, sellQty[b.token] ?? have));
+      const hers = m.board.buys.find((x) => x.token === b.token)?.price;
+      const beats = hers != null && hers > b.price ? "up" : "down"; // green: you'd get more from her
+      const vs = hers != null && m.dealer.open ? ` <span class="tide-note ${beats}">Maren pays about ${hers}</span>` : "";
+      const sub = m.dealer.open
+        ? `You have ${have}. His hold has ${b.stock} of ${m.dealer.hold[b.token]} and he pays about ${b.price} each.${vs}`
+        : `You have ${have}. Closed until the storm passes.`;
+      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true, true)}</div><div class="sub">${sub}</div></div>
+        <div class="buy">${
+          have > 0 && m.dealer.open
+            ? `<span class="qty"><button data-qty-token="${b.token}" data-d="-1">−</button>${qty}<button data-qty-token="${b.token}" data-d="1">+</button></span><button class="btn small" data-open="buy" data-token="${b.token}" data-qty="${qty}">Sell</button>`
+            : ""
+        }</div></div>`;
+    }
+    html += `<p class="sub board-hint">Silas pays city prices while his hold has room, then ships it all to the city and starts again. He doesn't buy anything else, and he sells nothing.</p>`;
+  } else if (tab === "buy") {
     for (const w of m.board.sells) {
       const mine = pv.items[idx(w.token)];
       let sub = BLURB[w.token];
@@ -739,7 +789,9 @@ function renderShop() {
     for (const b of m.board.buys) {
       const have = pv.items[idx(b.token)];
       const qty = Math.max(1, Math.min(have, sellQty[b.token] ?? have));
-      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${b.price} each.${tideNote(b.token)}</div></div>
+      const his = m.dealer?.open ? m.dealer.board.find((x) => x.token === b.token)?.price : null;
+      const vs = his ? ` <span class="tide-note ${his > b.price ? "up" : "down"}">Silas pays about ${his}</span>` : ""; // green: you'd get more from him
+      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${b.price} each.${tideNote(b.token)}${vs}</div></div>
         <div class="buy">${
           have > 0
             ? `<span class="qty"><button data-qty-token="${b.token}" data-d="-1">−</button>${qty}<button data-qty-token="${b.token}" data-d="1">+</button></span><button class="btn small" data-open="buy" data-token="${b.token}" data-qty="${qty}">Sell</button>`
@@ -764,8 +816,9 @@ function renderDeal() {
   $("deal-what").textContent = `${session.qty} × ${NAMES[session.token]}`;
   $("deal-price").textContent = session.counter;
   $("take").textContent = selling ? `Pay ${session.counter}` : `Take ${session.counter}`;
-  $("patience").textContent = session.final ? "her final offer" : "patience " + "●".repeat(session.patience) + "○".repeat(Math.max(0, 5 - session.patience));
-  $("deal-hint").textContent = selling ? (session.counter > coins ? `You have ${coins} coins. Offer less, or sell her something first.` : "Offer less than she asks.") : "Ask for more than she offers.";
+  const her = silasHere() ? "his" : "her";
+  $("patience").textContent = session.final ? `${her} final offer` : "patience " + "●".repeat(session.patience) + "○".repeat(Math.max(0, 5 - session.patience));
+  $("deal-hint").textContent = selling ? (session.counter > coins ? `You have ${coins} coins. Offer less, or sell her something first.` : "Offer less than she asks.") : `Ask for more than ${silasHere() ? "he" : "she"} offers.`;
   for (const id of ["offer-go", "take", "walk", "offer-up", "offer-down"]) $(id).disabled = talking;
 }
 
@@ -774,7 +827,7 @@ async function hag(body) {
   talking = true;
   renderDeal();
   try {
-    const r = await api("/api/haggle", { player: me, ...body });
+    const r = await api("/api/haggle", { player: me, merchant: shopWho, ...body });
     const fresh = body.action === "open";
     session = r.session;
     sayBubble(r.reply);
@@ -783,7 +836,7 @@ async function hag(body) {
     if (r.blocked) {
       $("stamp").hidden = false;
       $("stamp").innerHTML = `REFUSED BY THE LEDGER: ${r.blocked.reason.replace(/_/g, " ")}. <a target="_blank" rel="noopener" href="${cfg.explorer}/txns/${r.blocked.txHash}">See it on-chain</a>`;
-      txs.unshift({ label: "Maren's quote was refused", hash: r.blocked.txHash });
+      txs.unshift({ label: `${silasHere() ? "Silas's" : "Maren's"} quote was refused`, hash: r.blocked.txHash });
       renderLedger();
     } else if (fresh) $("stamp").hidden = true;
     if (session && fresh) $("offer").value = Math.max(1, Math.round(session.counter * (session.side === "sell" ? 0.85 : 1.15)));
@@ -1099,7 +1152,7 @@ canvas.addEventListener("pointerdown", (e) => {
   const x = ((e.clientX - rect.left) * W) / rect.width;
   const y = ((e.clientY - rect.top) * H) / rect.height;
   // clicking a place of interest walks there and uses it
-  let hit = HOTSPOTS.find((h) => Math.hypot(h.x - x, h.y - y) < 46);
+  let hit = HOTSPOTS.find((h) => present(h, S) && Math.hypot(h.x - x, h.y - y) < 46);
   if (!hit && x > 722 && x < 878 && y > 280 && y < 410) hit = HOTSPOTS.find((h) => h.id === "stall");
   if (!hit && x > 350 && x < 424 && y > 6 && y < 156) hit = HOTSPOTS.find((h) => h.id === "lighthouse");
   if (!hit && x < 236 && y > 400 && y < 620) hit = HOTSPOTS.find((h) => h.id === "reef");
@@ -1273,6 +1326,7 @@ function frame(now) {
   S.near = null;
   let best = Infinity;
   for (const h of HOTSPOTS) {
+    if (!present(h, S)) continue;
     const d = Math.hypot(h.x - p.x, h.y - p.y);
     if (d < h.r && d < best) {
       best = d;
@@ -1313,7 +1367,7 @@ function frame(now) {
 async function boot() {
   resize();
   requestAnimationFrame(frame);
-  $("portrait").innerHTML = `<svg viewBox="0 0 56 56" width="56" height="56"><circle cx="28" cy="28" r="28" fill="#cfe4e0"/><circle cx="28" cy="11" r="7" fill="#d8d8d2"/><path d="M8 56c0-13 9-19 20-19s20 6 20 19z" fill="#2f7f86"/><path d="M14 44l14 10 14-10-3-5H17z" fill="#e3b24f"/><circle cx="28" cy="26" r="13" fill="#e9bf9b"/><path d="M15 25a13 13 0 0 1 26 0c-5-6-21-6-26 0z" fill="#d8d8d2"/><circle cx="23.5" cy="27" r="1.6" fill="#3b2f2a"/><circle cx="32.5" cy="27" r="1.6" fill="#3b2f2a"/><path d="M23 32q5 4 10 0" fill="none" stroke="#8a4c3a" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+  $("portrait").innerHTML = MAREN_FACE;
   try {
     cfg = await api("/api/config");
     near = new Near(cfg.rpcUrls);

@@ -16,6 +16,7 @@ const BLOCKS = [
   { x1: 1022, x2: 1142, y1: 520, y2: 600 }, // the cottage
   { x1: 356, x2: 416, y1: 92, y2: 148 }, // the lighthouse
   { x1: 936, x2: 1014, y1: 486, y2: 508 }, // the notice board
+  { x1: 494, x2: 528, y1: 288, y2: 306 }, // Silas's crates
 ];
 
 export const HOTSPOTS = [
@@ -25,7 +26,11 @@ export const HOTSPOTS = [
   { id: "stall", x: 800, y: 432, r: 78, label: "Maren's stall", verb: "Talk to Maren", pillUp: 176 },
   { id: "lighthouse", x: 424, y: 170, r: 72, label: "The old lighthouse", verb: "Climb the lighthouse", pillUp: 44 },
   { id: "board", x: 975, y: 534, r: 62, label: "The notice board", verb: "Read the notice board", pillUp: 150 },
+  // only while the dealer is in town (`S.dealer`)
+  { id: "dealer", x: 504, y: 344, r: 50, label: "Silas, the dealer", verb: "Trade with Silas", pillUp: 124, needs: "dealer" },
 ];
+/// Is this place there right now? (Silas's pitch only while he is in town.)
+export const present = (h, S) => !h.needs || Boolean(S[h.needs]);
 /// Where the notice board stands (for clicks).
 export const BOARD_BOX = { x1: 930, x2: 1020, y1: 400, y2: 512 };
 
@@ -705,6 +710,119 @@ function drawMaren(ctx, x, y, t, S) {
   if (talking) ellipse(ctx, x, y - 37 + bob, 2.4, 1.2 + Math.abs(talking), "#8a4c3a");
 }
 
+// ---------- Silas, the pearl and ore dealer, on the beach below the lighthouse ----------
+function drawDealerBoat(ctx, t, storm) {
+  const bob = Math.sin(t * (storm ? 2.6 : 1.3)) * (storm ? 4 : 1.5);
+  const tilt = Math.sin(t * (storm ? 2.1 : 1)) * (storm ? 0.12 : 0.04);
+  // the mooring line to a post on the sand
+  ellipse(ctx, 449, 334, 4, 2.5, "rgba(40,40,30,0.3)");
+  ctx.fillStyle = "#6b4a2b";
+  ctx.fillRect(446, 316, 6, 18);
+  ctx.strokeStyle = "#cdbb93";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(449, 320);
+  ctx.quadraticCurveTo(432, 330 + bob, 418, 322 + bob);
+  ctx.stroke();
+  if (!storm) return drawBoat(ctx, 386, 326 + bob, tilt);
+  // battened down: no sail, a tarp over the hull
+  ctx.save();
+  ctx.translate(386, 326 + bob);
+  ctx.rotate(tilt);
+  ctx.beginPath();
+  ctx.moveTo(-38, -4);
+  ctx.lineTo(38, -4);
+  ctx.lineTo(28, 10);
+  ctx.lineTo(-28, 10);
+  ctx.closePath();
+  ctx.fillStyle = "#9a6b3f";
+  ctx.fill();
+  rr(ctx, -34, -12, 68, 9, 4);
+  ctx.fillStyle = "#5f6b52";
+  ctx.fill();
+  ctx.fillStyle = "#6b4a2b";
+  ctx.fillRect(-2, -34, 3, 24);
+  ctx.restore();
+}
+
+function drawDealerPitch(ctx, t, S) {
+  const storm = S.storm?.active;
+  // crates of goods bound for the city
+  for (const [x, y, w, h] of [[496, 290, 18, 15], [512, 293, 16, 13], [502, 278, 15, 13]]) {
+    ctx.fillStyle = "#a77a4a";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#7d5733";
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.beginPath();
+    ctx.moveTo(x, y + h / 2);
+    ctx.lineTo(x + w, y + h / 2);
+    ctx.stroke();
+  }
+  // his sign
+  ctx.fillStyle = "#6b4a2b";
+  ctx.fillRect(531, 262, 3, 44);
+  rr(ctx, 491, 244, 84, 24, 4);
+  ctx.fillStyle = "#f3e7c9";
+  ctx.fill();
+  ctx.strokeStyle = "#7d5733";
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  ctx.fillStyle = "#3d4a6b";
+  ctx.textAlign = "center";
+  ctx.font = "700 9px system-ui, sans-serif";
+  ctx.fillText(storm ? "BACK AFTER" : "SILAS", 533, 254);
+  ctx.font = "8px system-ui, sans-serif";
+  ctx.fillText(storm ? "the storm" : "buys ore & pearls", 533, 264);
+  if (!storm) drawSilas(ctx, 476, 314, t, S);
+}
+
+function drawSilas(ctx, x, y, t, S) {
+  const bob = Math.sin(t * 1.6 + 1) * 1;
+  const talking = S.shopOpen && S.shopWho === "silas" ? Math.sin(t * 9) * 1 : 0;
+  ellipse(ctx, x, y + 1, 14, 4, "rgba(30,40,30,0.25)");
+  ctx.fillStyle = "#2b2f3a";
+  ctx.fillRect(x - 7, y - 12, 5, 13);
+  ctx.fillRect(x + 2, y - 12, 5, 13);
+  // a long city coat
+  ctx.beginPath();
+  ctx.moveTo(x - 13, y - 8 + bob);
+  ctx.lineTo(x - 10, y - 40 + bob);
+  ctx.lineTo(x + 10, y - 40 + bob);
+  ctx.lineTo(x + 13, y - 8 + bob);
+  ctx.closePath();
+  ctx.fillStyle = "#3d4a6b";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x - 6, y - 40 + bob);
+  ctx.lineTo(x, y - 29 + bob);
+  ctx.lineTo(x + 6, y - 40 + bob);
+  ctx.closePath();
+  ctx.fillStyle = "#b8432f";
+  ctx.fill();
+  ellipse(ctx, x, y - 24 + bob, 1.4, 1.4, "#e3b24f");
+  ellipse(ctx, x, y - 17 + bob, 1.4, 1.4, "#e3b24f");
+  rr(ctx, x + 9, y - 27 + bob, 9, 11, 2); // satchel
+  ctx.fillStyle = "#8a5a32";
+  ctx.fill();
+  // head, beard, eyes
+  ellipse(ctx, x, y - 50 + bob, 10, 10, "#d9a77f");
+  ctx.beginPath();
+  ctx.arc(x, y - 48 + bob, 9.5, 0.12 * Math.PI, 0.88 * Math.PI);
+  ctx.fillStyle = "#4a3426";
+  ctx.fill();
+  ellipse(ctx, x - 3.5, y - 52 + bob, 1.3, 1.5, "#2a211c");
+  ellipse(ctx, x + 3.5, y - 52 + bob, 1.3, 1.5, "#2a211c");
+  if (talking) ellipse(ctx, x, y - 44 + bob, 2.2, 1 + Math.abs(talking), "#2a211c");
+  // a tall hat
+  ctx.fillStyle = "#23262e";
+  ctx.fillRect(x - 13, y - 61 + bob, 26, 3);
+  rr(ctx, x - 8, y - 77 + bob, 16, 17, 2);
+  ctx.fill();
+  ctx.fillStyle = "#b8432f";
+  ctx.fillRect(x - 8, y - 64 + bob, 16, 3);
+}
+
 function drawLighthouse(ctx, t, lit) {
   const x = 386;
   const base = 148;
@@ -899,10 +1017,12 @@ export function drawWorld(ctx, t, S) {
   drawWashedUp(ctx, lvl);
   drawCliffs(ctx, t);
   drawPier(ctx, t, S.hasBoat && !S.atSea);
+  if (S.dealer) drawDealerBoat(ctx, t, S.storm?.active);
   drawTidePools(ctx, t, lvl);
 
   // spots you can use, with a soft ring
   for (const h of HOTSPOTS) {
+    if (!present(h, S)) continue;
     const near = S.near === h.id;
     const pulse = 0.5 + 0.5 * Math.sin(t * 3);
     ctx.strokeStyle = `rgba(255,255,255,${near ? 0.75 : 0.22 + 0.12 * pulse})`;
@@ -921,6 +1041,7 @@ export function drawWorld(ctx, t, S) {
     { y: 404, draw: () => drawStall(ctx, t, S) },
     { y: 601, draw: () => drawCottage(ctx, t, S.night) },
     { y: 506, draw: () => drawNoticeBoard(ctx, t, S) },
+    ...(S.dealer ? [{ y: 314, draw: () => drawDealerPitch(ctx, t, S) }] : []),
     ...TREES.map(([x, y, s]) => ({ y, draw: () => drawTree(ctx, x, y, s, t) })),
   ];
   if (!S.atSea) things.push({ y: S.player.y, draw: () => drawPlayer(ctx, S.player, t) });
