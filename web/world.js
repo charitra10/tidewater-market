@@ -290,10 +290,36 @@ const CLOUDS = [[80, 26, 1.2], [380, 8, 1], [640, 34, 1.3], [920, 12, 1.1], [118
 /// The sky closes in, cloud drifts over, rain, and now and then lightning.
 /// `level` is 0 (calm) .. 1 (the storm at full blow).
 // ---------- events (see eventAt in tide.js) ----------
-/// Colour the water (drawn before the land, so only the sea takes it).
-function tintSea(ctx, colour) {
+/// Colour the water (drawn before the land, so only the sea takes it). The
+/// "color" blend keeps the waves' light and dark and swaps in the new hue.
+function tintSea(ctx, colour, blend = "source-over") {
+  ctx.globalCompositeOperation = blend;
   ctx.fillStyle = colour;
   ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = "source-over";
+}
+/// A flat calm: the still water catches the light.
+const GLINTS = (() => {
+  const r = rng(77);
+  return Array.from({ length: 34 }, () => {
+    const y = 40 + r() * 640;
+    return { x: 20 + r() * (shoreX(y) - 70), y, w: 6 + r() * 14, k: r() * 6 };
+  });
+})();
+function drawGlints(ctx, t) {
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  for (const g of GLINTS) {
+    const a = Math.max(0, Math.sin(t * 1.3 + g.k * 2));
+    if (a < 0.05) continue;
+    ctx.globalAlpha = 0.75 * a;
+    ctx.beginPath();
+    ctx.moveTo(g.x - g.w / 2, g.y);
+    ctx.lineTo(g.x + g.w / 2, g.y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
 }
 /// Fog: banks of white drifting in off the sea, thickest over the water.
 function drawFog(ctx, t) {
@@ -351,10 +377,14 @@ function drawWreck(ctx, t) {
 /// The lantern festival: bunting over the stall, lanterns glowing after dark.
 function drawBunting(ctx, t, night) {
   const colours = ["#d9534f", "#e3b24f", "#2f8f96", "#7a5aa6"];
+  // above the awning (not across Maren's face), then down to the notice board's roof
   const strings = [
-    [[726, 318], [874, 318]],
-    [[874, 318], [1030, 470]],
+    [[724, 262], [876, 262]],
+    [[876, 262], [1012, 424]],
   ];
+  ctx.fillStyle = "#6e5034"; // two poles on the stall's corners to hang it from
+  ctx.fillRect(722, 260, 3, 40);
+  ctx.fillRect(875, 260, 3, 40);
   for (const [[x1, y1], [x2, y2]] of strings) {
     const n = 9;
     const sag = 18;
@@ -1137,8 +1167,11 @@ export function drawWorld(ctx, t, S) {
   const rough = S.storm?.level ?? 0;
   const event = S.event?.active ? S.event.kind : null;
   drawSea(ctx, t, wx, rough);
-  if (event === "red_tide") tintSea(ctx, "rgba(176,48,40,0.32)");
-  if (event === "calm") tintSea(ctx, "rgba(255,255,255,0.12)");
+  if (event === "red_tide") tintSea(ctx, "rgba(196,48,36,0.7)", "color");
+  if (event === "calm") {
+    tintSea(ctx, "rgba(255,255,255,0.14)");
+    drawGlints(ctx, t);
+  }
   drawReef(ctx, t, lvl);
   drawLand(ctx, t, wx);
   drawWashedUp(ctx, lvl);
@@ -1231,7 +1264,7 @@ export function drawWorld(ctx, t, S) {
     ctx.fillStyle = "#fff";
     ctx.textAlign = "left";
     ctx.fillText(S.busyText + dots, px - w / 2 + 12, py + 1);
-  } else if (S.near && !S.shopOpen && !S.boardOpen) {
+  } else if (S.near && !S.shopOpen && !S.boardOpen && !S.benchOpen) {
     const h = HOTSPOTS.find((s) => s.id === S.near);
     let sub = h.cost ? `${h.cost} energy` : "";
     const outdoors = h.id === "shore" || h.id === "reef" || h.id === "cliffs";

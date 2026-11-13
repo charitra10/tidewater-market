@@ -1009,6 +1009,23 @@ async function settle(deal) {
   }
 }
 
+/// Where to head first on the way to `target`, if the straight line is blocked:
+/// the pier has one way on and off (its landward end), and the workbench stands
+/// behind the cottage (go round it).
+function waypoint(target, p) {
+  const onPier = (q) => q.x < 505 && q.y > 540 && q.y < 580;
+  if (onPier(target) !== onPier(p)) return { x: 522, y: 558 };
+  if (target.then === "bench") {
+    if (p.x < 1150) {
+      if (p.y >= 600) return p.x < 1050 ? { x: 1060, y: 640 } : null; // below the cottage
+      return p.x < 1090 ? { x: 1100, y: 468 } : { x: 1170, y: 505 }; // above the notice board, then past the cottage
+    }
+    // behind the bench: round its east end to the front
+    if (p.y < 586) return p.x < 1228 ? { x: 1236, y: 540 } : { x: 1236, y: 590 };
+  }
+  return null;
+}
+
 // ---------- the workbench: make rope and pickaxes yourself ----------
 // The same recipes as Maren's, from what is in your bag, for energy instead of
 // coins (`player_craft` in the contract). Boats and beacon lenses are her work.
@@ -1504,11 +1521,8 @@ function frame(now) {
     let dy = (keys.has("s") || keys.has("arrowdown") ? 1 : 0) - (keys.has("w") || keys.has("arrowup") ? 1 : 0);
     if (dx || dy) target = null;
     else if (target) {
-      // the pier has one way on and off: go by its landward end first
-      const onPier = (q) => q.x < 505 && q.y > 540 && q.y < 580;
-      if (target.via === undefined) target.via = onPier(target) !== onPier(p) ? { x: 522, y: 558 } : null;
-      if (target.via && Math.hypot(p.x - target.via.x, p.y - target.via.y) < 8) target.via = null;
-      const stop = target.via ?? target;
+      const via = waypoint(target, p);
+      const stop = via && Math.hypot(p.x - via.x, p.y - via.y) >= 8 ? via : target;
       dx = stop.x - p.x;
       dy = stop.y - p.y;
       if (stop === target && Math.hypot(dx, dy) < 7) {
@@ -1537,11 +1551,13 @@ function frame(now) {
       if (Math.abs(dx) > 0.5) p.face = dx > 0 ? 1 : -1;
       if (target) {
         // give up on a click the player is no longer getting closer to
-        const stop = target.via ?? target;
+        const via = waypoint(target, p);
+        const stop = via && Math.hypot(p.x - via.x, p.y - via.y) >= 8 ? via : target;
         const d = Math.hypot(stop.x - p.x, stop.y - p.y);
-        if (target.bestFor !== stop || d < target.best - 2) {
+        const key = `${stop.x},${stop.y}`; // (a waypoint is a fresh object each frame)
+        if (target.bestFor !== key || d < target.best - 2) {
           target.best = d;
-          target.bestFor = stop;
+          target.bestFor = key;
           target.bestAt = now;
         } else if (now - target.bestAt > 1200) target = null;
       }
