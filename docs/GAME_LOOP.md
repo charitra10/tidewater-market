@@ -4,6 +4,8 @@ What a player does every 30 seconds, every 5 minutes, every half hour and every 
 
 This is the design as it stands in the game today. It was written up after the code, not before it. The numbers come from the code, and the files and functions that set them are linked as they come up. Things that are planned but not built yet are listed separately at the end.
 
+Want to watch it rather than read it? [`web/sim.html`](../web/sim.html) runs a week of these loops in a minute with the merchants' real rules (a simulation, no transactions).
+
 ## At a glance
 
 | Timescale | What you do | What drives it |
@@ -24,7 +26,7 @@ Energy is the clock at this scale. You have up to 12 points and get one back eve
 | Cliffs | 2 | a pickaxe, which breaks 12% of the time | 1–2 ore, 0–1 driftwood | about 15 per point, or 11 after the pickaxes you will break |
 | Reef | 3 | a boat | 0–3 pearls, depending on the tide, and 1–2 kelp | about 18 per point, and up to 30 if you gather at low water and sell at high |
 
-The yields are the `forage` function in [`contract/src/lib.rs`](../contract/src/lib.rs). The prices are Maren's bids at her target stock with a comfortable treasury ([`unitBid`](../server/merchant.js)); they fall as her shelf fills, and rise when she runs short.
+The yields are the `forage` function in [`contract/src/lib.rs`](../contract/src/lib.rs). The prices are Maren's bids at her target stock with a comfortable treasury ([`unitBid`](../web/merchant.js)); they fall as her shelf fills, and rise when she runs short.
 
 Then you walk to a buyer and decide:
 
@@ -32,7 +34,7 @@ Then you walk to a buyer and decide:
 - **Silas** on the beach buys only ore and pearls, and his offer is shown next to hers.
 - **The notice board** by the cottage: pin your goods at your own price and wait for another player, or buy someone else's.
 
-At the stall you can make an offer, take her price, walk away (she may call you back, but only once per haggle), or type to her. She has a hidden limit, patience that runs out, and a mood that remembers how you treated her ([`openHaggle`, `haggle`](../server/merchant.js)). A deal is a quote she posts on-chain, which you accept; she keeps it open for 2 minutes.
+At the stall you can make an offer, take her price, walk away (she may call you back, but only once per haggle), or type to her. She has a hidden limit, patience that runs out, and a mood that remembers how you treated her ([`openHaggle`, `haggle`](../web/merchant.js)). A deal is a quote she posts on-chain, which you accept; she keeps it open for 2 minutes.
 
 **The choice every time: sell now, or hold.** Each extra unit you sell her is priced lower than the last, because her shelf is fuller, and everyone's recent selling pulls her bid down for a while (by up to 25%, halving every 5 minutes). The tide may pay more in a couple of minutes, and Silas may have room in his hold. Hover over (or tap) any price to see how she worked it out.
 
@@ -52,8 +54,8 @@ Over a whole tide her offers average out to her ordinary price, so the tide rewa
 
 - **gathers at low water**: the rock pools, and the reef if you have a boat;
 - **sells at high water**: kelp fetches 50% more than it did at low water, and pearls 35% more (57 coins against 42 on an everyday shelf);
-- **watches Silas's hold.** He holds at most 4 ore and 3 pearls ([`DEALER_HOLD`](../server/merchant.js)). With an empty hold he pays about 25 for ore and 67 for a pearl, well above Maren's 19 and 50. With a nearly full hold he pays less than she does. He ships when his hold is full, and at every high tide, so he pays least just before high water and most just after;
-- **checks the board**: for bargains, for a used pickaxe or boat, or for the notices Maren and Silas pin for each other. Maren leaves a player's fresh notice alone for 15 seconds (3 minutes for a tool), so players get first pick ([`BOARD_GRACE_MS`](../server/merchant.js));
+- **watches Silas's hold.** He holds at most 4 ore and 3 pearls ([`DEALER_HOLD`](../web/merchant.js)). With an empty hold he pays about 25 for ore and 67 for a pearl, well above Maren's 19 and 50. With a nearly full hold he pays less than she does. He ships when his hold is full, and at every high tide, so he pays least just before high water and most just after;
+- **checks the board**: for bargains, for a used pickaxe or boat, or for the notices Maren and Silas pin for each other. Maren leaves a player's fresh notice alone for 15 seconds (3 minutes for a tool), so players get first pick ([`BOARD_GRACE_MS`](../web/merchant.js));
 - **reads the market**: every item at the stall has a small price line for the last few minutes, and the ticker under your purse shows what other players just did. Both come from the contract's trade log;
 - **saves up** for the next tool.
 
@@ -97,7 +99,7 @@ The goal list in the corner of the screen ([`web/game.js`](../web/game.js)) is t
 4. **Buy the beacon lens.** About 600 coins.
 5. **Light the lighthouse.** The lens is burnt, your time goes on the keepers' board on the title screen, and the lighthouse shines over the village at night.
 
-Those are her asking prices with the usual stock on the shelf ([`unitAsk`](../server/merchant.js)). She asks more when she is short (78 for her last pickaxe), never less than it cost her plus 15%, and never outside the on-chain floor and ceiling.
+Those are her asking prices with the usual stock on the shelf ([`unitAsk`](../web/merchant.js)). She asks more when she is short (78 for her last pickaxe), never less than it cost her plus 15%, and never outside the on-chain floor and ceiling.
 
 What makes each session different is the shared market. Everything Maren sells, she crafted from what players sold her. If the boat is sold out, the stall shows what she is missing, and bringing it to her is how the next boat gets built. Someone else may have flooded her with ore an hour ago, so ore pays little today. Silas may have just shipped, so pearls pay well.
 
@@ -136,12 +138,11 @@ The market keeps moving whether or not you are at the stall:
   - buys board notices priced under her own bid;
   - pins her surplus ore for Silas when he would pay more than the mainland.
 - **Silas** ships at high tide or when his hold is full. When Maren is out of pearls for a beacon, he pins his for her.
-- **Prices follow the books and recent demand.** Her bid for a good falls as her shelf fills, as her treasury runs low, and for a while after players have been selling it to her. Her asking price for a tool rises as her shelf empties and while players have been buying them ([`server/merchant.js`](../server/merchant.js)). Hover over any price at the stall to see the working.
+- **Prices follow the books and recent demand.** Her bid for a good falls as her shelf fills, as her treasury runs low, and for a while after players have been selling it to her. Her asking price for a tool rises as her shelf empties and while players have been buying them ([`web/merchant.js`](../web/merchant.js)). Hover over any price at the stall to see the working.
 - **The guard rails** are checked by the contract on every deal: price floors and ceilings, a spending cap of 1500 coins per 10 minutes, stock and treasury checks. A refused deal is recorded on-chain with its reason.
 
 ## Planned, not built yet
 
 These are on the plan and are **not** in the game today:
 
-- **Fast-forward:** a simulation of a week of trading in a minute, using the same pricing code, so you can watch the economy move.
 - **Sign in with Google**, so your stall follows you to another device.
