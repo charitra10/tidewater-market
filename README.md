@@ -6,6 +6,8 @@ The lighthouse in Tidewater has been dark for years. Maren, who keeps the only s
 
 Maren is not a menu. She is a separate NEAR account with a real treasury. She pays you in NEAR for what you bring, turns it into tools in her workshop, and sells the tools back at prices she sets from her own stock, her own costs and how much coin she has left. Nobody patches the prices: they move because of what players do.
 
+Players also trade with each other. The notice board by the cottage is a market the players run themselves: pin your goods at your own price, and the buyer's NEAR goes straight to you. Maren reads the board too, and buys whatever is priced under what she would pay.
+
 ![Haggling with Maren at her stall](docs/stall.jpg)
 
 Built at **NEAR Hackathon 2026** for the **Games With Real Economies** track (also fits **Agent Economy**). Runs on NEAR **testnet**.
@@ -26,12 +28,13 @@ Then visit **http://localhost:8787** and press **Step ashore**. There is nothing
 - **Walk** with `WASD` / arrow keys, or click where you want to go.
 - **Use** what is nearby with `E` (or click it): the tide pools, the cliffs, the pier, Maren's stall, the lighthouse.
 - At the stall, pick something to buy or sell, then **make an offer**, **take her price**, **walk away**, or just **type to her**.
+- At the **notice board** (by the cottage), buy what other players are selling, or pin your own goods at your own price.
 - The **Ledger** button (bottom right) shows what happened on-chain, for the curious.
 
 To watch the whole loop without a browser, a bot can play it for you. It uses the same signing code as the game:
 
 ```bash
-node scripts/play.mjs          # ~2 min: forage, haggle, sell, try to trick Maren, buy a pickaxe, mine
+node scripts/play.mjs          # ~2 min: forage, haggle, sell, try to trick Maren, buy a pickaxe, mine, trade on the notice board
 node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the beacon and the lighthouse
 ```
 
@@ -53,7 +56,8 @@ node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the b
 1. **Forage.** Each trip costs energy, which refills over time. The shore is free. The cliffs need a pickaxe (which can break). The reef needs a boat.
 2. **Sell.** Maren buys kelp, driftwood, ore and pearls. The more of something she already holds, the less she pays. If she needs it to build something she has run out of, she pays more.
 3. **Buy.** She sells pickaxes, a boat and the beacon lens, but only if she has them. Everything on her shelf is crafted from what players sold her: 3 kelp make a rope; 2 driftwood and a rope make a pickaxe; a boat takes driftwood, rope and ore; the beacon takes pearls, ore and rope. If the boat is sold out, the stall shows what she is missing, and bringing it to her is how the boat gets built.
-4. **Light the lighthouse** with the beacon lens. Your time goes on the keepers' board.
+4. **Trade with other players** on the notice board. A spare pickaxe, a boat you no longer need, ore at a better price than Maren pays: pin it, and whoever buys it pays you directly. Maren doesn't buy tools back at her stall, so the board is the only place to sell a used one.
+5. **Light the lighthouse** with the beacon lens. Your time goes on the keepers' board. Your boat and pickaxe can then go on the board for the next newcomer.
 
 ![The lighthouse, relit](docs/lighthouse.jpg)
 
@@ -62,14 +66,16 @@ node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the b
 - **Coins are testnet NEAR.** 1 coin = 0.001 NEAR. When Maren buys your kelp, the contract transfers NEAR from her treasury to your account. When you buy a pickaxe, your NEAR goes into her treasury.
 - **Her prices come from her books.** Asking price rises as her shelf empties and never drops below what the item cost her plus a margin. Her bids fall as she fills up and when her treasury runs thin. The contract keeps her average cost per item and her running profit ([`get_market`](contract/src/lib.rs)).
 - **Players share one market.** If someone floods her with kelp, kelp is worth less for everyone until her workshop and the mainland boat clear it. You can watch it happen: a ticker under your purse shows what other players just bought, sold or tried on Maren (read from the contract's trade log, nothing made up), and every item at the stall has a small line of how its price moved over the last few minutes. The title screen shows the keepers' board.
+- **Players have a market of their own.** On the notice board, pinned goods wait in the contract (escrow) and the buyer's NEAR goes straight to the seller, in the same transaction. Partial buys work, notices last a day, and taking one down returns the goods. When Maren is sold out of boats, the stall points you to anyone selling one on the board.
+- **Maren trades on the board too.** Between customers she buys raw goods priced at or under her own bid (her bid drops with each unit, so she may take only part of a big lot), and used tools only while she is short of them and for at most 55% of their everyday value, so buying from her and selling back cannot turn a profit (a unit test checks this at every stock level). She leaves fresh notices alone for a while so players get first pick ([`boardPicks`](server/merchant.js)).
 - **She runs her business between customers.** A workshop loop crafts what is missing and ships surplus raw goods to "the mainland" at fixed export prices. That export fund is filled by the contract owner and is the one place new NEAR enters the game.
 - **Items are yours.** They are multi-token balances in the contract (NEP-245 core views, `mt_transfer` and events). You can give them to another player.
 
 ## The guard rails on Maren
 
-Maren's key is a NEAR function-call key that can only call four methods on the market contract: `post_quote`, `cancel_quote`, `craft` and `export`. It cannot move NEAR and it cannot change the rules.
+Maren's key is a NEAR function-call key that can only call five methods on the market contract: `post_quote`, `cancel_quote`, `craft`, `export` and `shop_buy_listing`. It cannot move NEAR and it cannot change the rules.
 
-Every deal is a quote she posts on-chain and the player accepts. The contract checks each quote before it exists:
+Every deal is a quote she posts on-chain and the player accepts, or a notice she buys off the board. The contract checks each one before any NEAR moves:
 
 | Rule | Reason shown on-chain |
 |---|---|
@@ -95,9 +101,9 @@ Her lines are written sentences picked at random ([`server/voice.js`](server/voi
 
 | Path | What |
 |---|---|
-| `contract/` | The market contract (Rust, near-sdk): items, energy, foraging, quotes, guard rails, crafting, exports, the keepers' board. Prebuilt wasm in `contract/res/`. |
+| `contract/` | The market contract (Rust, near-sdk): items, energy, foraging, quotes, guard rails, crafting, exports, the notice board, the keepers' board. Prebuilt wasm in `contract/res/`. |
 | `server/server.js` | Runs Maren (haggling, posting her quotes with her key, the workshop), creates guest accounts, serves the game. Passes on the contract's trade log and keepers' board, and remembers recent prices for the price lines. |
-| `server/merchant.js` | Her pricing and bargaining, as pure functions. |
+| `server/merchant.js` | Her pricing, her bargaining and what she buys off the notice board, as pure functions. |
 | `web/` | The game: `game.js` (logic), `world.js` (the village, drawn in code), `near-lite.js` (transaction signing in ~350 lines, shared with the server and the bot). |
 | `scripts/` | `bootstrap.sh` (set up your own market), `play.mjs` (the bot), `test.sh`, `build.sh`. |
 
@@ -107,8 +113,8 @@ Her lines are written sentences picked at random ([`server/voice.js`](server/voi
 ./scripts/test.sh     # needs Rust
 ```
 
-- **26 contract unit tests**: energy, foraging, both directions of trade, every guard rail, crafting cost, exports, the keepers' board, item transfers.
-- **21 tests of Maren's pricing and bargaining** (`cd server && node --test`, no Rust needed).
+- **42 contract unit tests**: energy, foraging, both directions of trade, every guard rail, crafting cost, exports, the keepers' board, item transfers; and for the notice board: escrow, buying all or part of a notice (the seller is paid, the buyer gets the change), taking a notice down, expiry, the per-player and board limits, Maren buying from her treasury under the same guard rails, and that every item is always in a bag, on a shelf or on the board. Two more upgrade the live contract's real saved state (`contract/tests/fixtures/v1_state.bin`) and check nothing is lost.
+- **28 tests of Maren's pricing, bargaining and board buying** (`cd server && node --test`, no Rust needed), including that no tool can be bought from her and sold back to her at a profit.
 - **The bot** (`scripts/play.mjs`) is the end-to-end test: real transactions on testnet through the same code the browser runs.
 
 ## On-chain
@@ -119,10 +125,11 @@ Main contract methods:
 
 | Who | Methods |
 |---|---|
-| Player | `join`, `forage(spot)`, `accept_quote(id)` (payable), `light_beacon`, `mt_transfer`, `mt_batch_transfer` |
-| Maren's key | `post_quote`, `cancel_quote`, `craft`, `export` |
+| Player | `join`, `forage(spot)`, `accept_quote(id)` (payable), `light_beacon`, `mt_transfer`, `mt_batch_transfer`, `list_item(token_id, qty, unit_price)`, `buy_listing(id, qty?)` (payable), `cancel_listing(id)` |
+| Maren's key | `post_quote`, `cancel_quote`, `craft`, `export`, `shop_buy_listing(id, qty)` |
+| The contract account itself | `migrate` (one-time upgrade that added the notice board, run in the same transaction as the new code) |
 | Owner (1 yoctoNEAR, so a full-access key is needed) | `set_policy`, `freeze`, `unfreeze`, `fund_treasury`, `fund_mainland`, `withdraw_treasury`, `restock`, `set_merchant` |
-| Anyone (views) | `get_market`, `get_policy`, `get_rules`, `get_player`, `get_quote`, `get_trades`, `get_blocked`, `get_keepers`, `mt_balance_of`, `mt_batch_balance_of`, `mt_supply` |
+| Anyone (views) | `get_market`, `get_policy`, `get_rules`, `get_player`, `get_quote`, `get_trades`, `get_blocked`, `get_keepers`, `get_listings`, `get_board_sales`, `mt_balance_of`, `mt_batch_balance_of`, `mt_supply` |
 
 ## Limits, honestly
 
@@ -135,7 +142,8 @@ Main contract methods:
 - **The export fund is a faucet.** When it is empty, Maren stops exporting and prices sag until players buy things. On mainnet it would need a real source of demand.
 - **NEP-245 is partial**: balances, supply, transfers and events only. No approvals and no `mt_transfer_call`.
 - **Public testnet RPC servers rate-limit.** The game spreads its calls over three of them and retries, but a busy moment can make an action take several seconds.
-- **Contract storage is paid by the contract**, not by players.
+- **Contract storage is paid by the contract**, not by players. That is why the notice board is capped: 40 notices at once, 3 per player.
+- **Expired notices are tidied lazily.** A notice expires after a day and can no longer be bought; its goods go back to the seller the next time anyone pins a notice, or at once if the seller takes it down.
 
 ## Built with
 

@@ -4,9 +4,10 @@
 // transaction on testnet.
 //
 //   node server/server.js &        (the shop must be open)
-//   node scripts/play.mjs          play until the first pickaxe and a cliffs run
+//   node scripts/play.mjs          play until the first pickaxe and a cliffs run,
+//                                  then trade on the notice board
 //   node scripts/play.mjs --full   keep going until the lighthouse is lit
-import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins } from "../web/near-lite.js";
+import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "../web/near-lite.js";
 
 const BASE = process.env.GAME_URL || "http://localhost:8787";
 const FULL = process.argv.includes("--full");
@@ -147,6 +148,55 @@ await waitEnergy(2);
 await forage("cliffs", 1);
 p = await player();
 check(have(p, "ore") >= 1, "mined ore with it");
+
+console.log(`\n▸ The notice board`);
+// A neighbour comes ashore and pins some kelp at their own price; I buy it.
+const nkp = await generateKey();
+const nkey = await loadKey(nkp.secret);
+const { accountId: neighbour } = await api("/api/guest", { publicKey: nkp.publicKey });
+console.log(`  a neighbour came ashore: ${neighbour}`);
+const ncall = (method, args = {}, deposit = 0n) => near.send(neighbour, nkey, cfg.contract, [actions.functionCall(method, args, 30n * TGAS, deposit)]);
+await ncall("join");
+await ncall("forage", { spot: "shore" });
+const kelpBid = (await api("/api/market?player=" + me)).history.prices.kelp.at(-1);
+const unit = Math.max(6, Math.ceil(kelpBid) + 3); // more than Maren pays, so she leaves it to players
+const notice = (await ncall("list_item", { token_id: "kelp", qty: 1, unit_price: coinsToYocto(unit).toString() })).value;
+say("them", `pinned 1 kelp on the board at ${unit} coins`);
+await sleep(2600); // let their gas refunds land before measuring their purse
+const theirs = await near.balance(neighbour);
+let kelp = have(await player(), "kelp");
+await call("buy_listing", { id: notice.id, qty: 1 }, coinsToYocto(unit));
+await sleep(2600);
+const gained = yoctoToCoins((await near.balance(neighbour)) - theirs);
+p = await player();
+const sale = (await near.view(cfg.contract, "get_board_sales", { limit: 1 }))[0];
+check(
+  have(p, "kelp") === kelp + 1 && gained >= unit && sale?.buyer === me && sale?.seller === neighbour,
+  `bought the neighbour's kelp off the board; the ${unit} coins went straight to them (their purse +${gained.toFixed(1)})`,
+);
+
+// Pin a notice, see the goods leave my bag, take it down again.
+kelp = have(p, "kelp");
+const mine = (await call("list_item", { token_id: "kelp", qty: 1, unit_price: coinsToYocto(999).toString() })).value;
+p = await player();
+check(have(p, "kelp") === kelp - 1 && p.on_board[TOK.indexOf("kelp")] === 1, "pinned a notice: the kelp waits on the board, not in my bag");
+await call("cancel_listing", { id: mine.id });
+p = await player();
+check(have(p, "kelp") === kelp && p.on_board[TOK.indexOf("kelp")] === 0, "took the notice down: the kelp came back");
+
+// Maren reads the board too: ore priced under her bid gets bought from her treasury.
+const oreBid = (await api("/api/market?player=" + me)).history.prices.ore.at(-1);
+const orePrice = Math.max(1, Math.floor(oreBid * 0.9));
+const oreNotice = (await call("list_item", { token_id: "ore", qty: 1, unit_price: coinsToYocto(orePrice).toString() })).value;
+say("me", `pinned 1 ore at ${orePrice} coins (Maren pays about ${oreBid})`);
+let bought = null;
+for (let i = 0; i < 25 && !bought; i++) {
+  await sleep(3000);
+  await api("/api/market?player=" + me); // (also keeps Maren's workshop awake)
+  bought = (await near.view(cfg.contract, "get_board_sales", { limit: 5 })).find((s) => s.listing_id === oreNotice.id);
+}
+if (!bought) await call("cancel_listing", { id: oreNotice.id }).catch(() => {});
+check(bought?.buyer === cfg.merchantId, `Maren bought my ore off the board for ${orePrice} coins, paid from her treasury`);
 
 if (FULL) {
   console.log(`\n▸ The long game: ore → boat → pearls → beacon → lighthouse`);

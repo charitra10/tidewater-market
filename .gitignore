@@ -6,3 +6,4 @@ node_modules/
 *.key
 .near-credentials/
 bootstrap.log
+upgrade.log
