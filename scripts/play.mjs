@@ -45,7 +45,8 @@ console.log(`  I am ${me}`);
 
 const call = (method, args = {}, deposit = 0n) => near.send(me, key, cfg.contract, [actions.functionCall(method, args, 30n * TGAS, deposit)]);
 const player = () => near.view(cfg.contract, "get_player", { account_id: me });
-const coins = async () => Math.max(0, yoctoToCoins((await near.balance(me)) - RESERVE));
+const purse = async (id) => Math.max(0, yoctoToCoins((await near.balance(id)) - RESERVE));
+const coins = () => purse(me);
 const have = (p, t) => p.items[TOK.indexOf(t)];
 let checks = 0;
 const check = (cond, what) => {
@@ -84,10 +85,11 @@ function shoreRangeByTide({ tide, spring, storm }) {
   return [[1, 3], [0, 2]];
 }
 
-/// Bargain: push back once or twice, then take what is offered. `merchant` is "maren" or "silas".
-async function trade(side, token, qty, merchant = "maren") {
+/// Bargain: push back once or twice, then take what is offered. `merchant` is "maren" or "silas";
+/// `as` is whoever is trading (me, unless the neighbour is).
+async function trade(side, token, qty, merchant = "maren", as = { id: me, send: call }) {
   const who = merchant === "silas" ? "Silas" : "Maren";
-  let r = await api("/api/haggle", { player: me, merchant, action: "open", side, token, qty });
+  let r = await api("/api/haggle", { player: as.id, merchant, action: "open", side, token, qty });
   say(who, r.reply);
   if (!r.session) return null;
   const better = (price, pct) => Math.round(side === "sell" ? price * (1 - pct) : price * (1 + pct));
@@ -95,19 +97,19 @@ async function trade(side, token, qty, merchant = "maren") {
     if (r.deal || !r.session || r.session.over) break;
     const offer = better(r.session.counter, pct);
     say("me", `how about ${offer}?`);
-    r = await api("/api/haggle", { player: me, merchant, action: "say", text: `how about ${offer} coins?` });
+    r = await api("/api/haggle", { player: as.id, merchant, action: "say", text: `how about ${offer} coins?` });
     say(who, r.reply);
   }
   if (!r.deal && r.session && !r.session.over) {
     say("me", "deal.");
-    r = await api("/api/haggle", { player: me, merchant, action: "accept" });
+    r = await api("/api/haggle", { player: as.id, merchant, action: "accept" });
     say(who, r.reply);
   }
   if (!r.deal) return null;
-  const before = await coins();
-  await call("accept_quote", { id: r.deal.quoteId }, side === "sell" ? BigInt(r.deal.totalYocto) : 0n);
+  const before = await purse(as.id);
+  await as.send("accept_quote", { id: r.deal.quoteId }, side === "sell" ? BigInt(r.deal.totalYocto) : 0n);
   await sleep(2600); // NEAR holds back a fee deposit for a moment after each transaction
-  const after = await coins();
+  const after = await purse(as.id);
   say("chain", `${side === "sell" ? "bought" : "sold"} ${qty} ${token} for ${r.deal.coins} coins (purse ${before.toFixed(1)} → ${after.toFixed(1)})`);
   return r.deal;
 }
@@ -311,29 +313,63 @@ console.log(`\n▸ Maren lends, takes stakes and sells storm cover`);
 let mk = await api("/api/market?player=" + me);
 if (mk.shops?.maren?.closed) console.log("  (her stall is shut: skipping)");
 else {
-  // a loan, if she has a pickaxe to spare
-  if (mk.stock.pickaxe >= 2 && (await player()).reputation >= 0) {
-    const loan = (await call("borrow", { token_id: "pickaxe" })).value;
-    say("me", `borrowed a pickaxe: I owe her ${yoctoToCoins(loan.owed).toFixed(0)} within two hours`);
-    await waitEnergy(2);
-    await forage("cliffs", 1);
-    const before = await settledView(player, (q) => q.loan);
-    const ore = have(before, "ore");
-    if (ore > 0) {
-      const deal = await trade("buy", "ore", ore);
-      const after = await settledView(player, (q) => q.loan && q.loan.repaid !== before.loan.repaid);
-      const withheld = yoctoToCoins(after.loan?.repaid ?? "0") - yoctoToCoins(before.loan.repaid);
-      check(deal && Math.abs(withheld - deal.coins / 2) <= 0.01, `sold her ${ore} ore for ${deal?.coins}: she kept ${withheld.toFixed(1)} of it for the loan`);
+  // I tried to cheat both of them earlier, so my name should keep me from a loan
+  const mine = await near.view(cfg.contract, "get_reputation", { account_id: me });
+  if (mine.score < 0) {
+    const no = await call("borrow", { token_id: "pickaxe" }).then(() => "lent", (e) => e.message);
+    check(/doesn't lend/.test(no), `Maren won't lend to me: my name is ${mine.score} after ${mine.tricks} tricks the ledger refused`);
+  }
+  // the neighbour has a clean name: they borrow a pickaxe (her workshop restocks, so give it a minute)
+  for (let i = 0; i < 18 && mk.stock.pickaxe < 2; i++) {
+    if (i === 0) console.log("  (waiting for Maren to make a spare pickaxe to lend)");
+    await sleep(5000);
+    mk = await api("/api/market?player=" + me);
+  }
+  const them = { id: neighbour, send: ncall };
+  const theirView = () => near.view(cfg.contract, "get_player", { account_id: neighbour });
+  const theirsWhen = async (ok) => {
+    for (let i = 0; i < 20; i++) {
+      const q = await theirView();
+      if (ok(q)) return q;
+      await sleep(1000);
     }
-    const owing = await player();
-    const left = yoctoToCoins(owing.loan.owed) - yoctoToCoins(owing.loan.repaid);
-    if ((await coins()) >= left + 1) {
-      await call("repay_loan", {}, coinsToYocto(Math.ceil(left)));
-      const paid = await settledView(player, (q) => !q.loan);
-      const rep = await near.view(cfg.contract, "get_reputation", { account_id: me });
-      check(!paid.loan && rep.loans_repaid === 1, `paid off the rest (${left.toFixed(1)}); the village remembers (name: ${rep.score})`);
-    } else console.log(`  (not enough coins to pay off the last ${left.toFixed(1)}: the loan stays, and she will call it in)`);
-  } else console.log("  (she has no pickaxe to spare, or does not trust me: no loan)");
+    return theirView();
+  };
+  if (mk.stock.pickaxe >= 2 && (await theirView()).reputation >= 0) {
+    const loan = (await ncall("borrow", { token_id: "pickaxe" })).value;
+    say("them", `borrowed a pickaxe: they owe her ${yoctoToCoins(loan.owed).toFixed(0)} within two hours`);
+    let q = await theirsWhen((x) => x.loan);
+    check(q.loan && have(q, "pickaxe") >= 1, `the loan is on-chain, due ${new Date(Number(q.loan.due_ms)).toISOString().slice(11, 16)} UTC`);
+    for (let i = 0; i < 3 && have(q, "ore") === 0 && q.energy >= 2; i++) {
+      const r = (await ncall("forage", { spot: "cliffs" })).value;
+      say("them", `foraged the cliffs: ${r.found[TOK.indexOf("ore")]} ore${r.tool_broke ? "  (the pickaxe broke!)" : ""}  [energy ${r.energy_left}]`);
+      q = await theirsWhen((x) => x.energy === r.energy_left);
+    }
+    const ore = have(q, "ore");
+    if (ore > 0) {
+      const deal = await trade("buy", "ore", ore, "maren", them);
+      const after = await theirsWhen((x) => x.loan && x.loan.repaid !== q.loan.repaid);
+      const withheld = yoctoToCoins(after.loan?.repaid ?? "0") - yoctoToCoins(q.loan.repaid);
+      check(deal && Math.abs(withheld - deal.coins / 2) <= 0.01, `they sold her ${ore} ore for ${deal?.coins}: she kept ${withheld.toFixed(1)} of it for the loan`);
+      q = after;
+    } else console.log("  (the cliffs gave them nothing to sell)");
+    const left = yoctoToCoins(q.loan.owed) - yoctoToCoins(q.loan.repaid);
+    if ((await purse(neighbour)) >= left + 1) {
+      await ncall("repay_loan", {}, coinsToYocto(Math.ceil(left)));
+      const paid = await theirsWhen((x) => !x.loan);
+      const rep = await near.view(cfg.contract, "get_reputation", { account_id: neighbour });
+      check(!paid.loan && rep.loans_repaid === 1, `they paid off the rest (${left.toFixed(1)}); the village remembers (name: ${rep.score})`);
+    } else {
+      // pay what they can spare; the rest stays, and she calls it in when it falls due
+      const part = Math.floor((await purse(neighbour)) - 3);
+      if (part >= 1) {
+        await ncall("repay_loan", {}, coinsToYocto(part));
+        const paid = await theirsWhen((x) => x.loan && x.loan.repaid !== q.loan.repaid);
+        const got = yoctoToCoins(paid.loan.repaid) - yoctoToCoins(q.loan.repaid);
+        check(Math.abs(got - part) <= 0.01, `they paid ${part} toward it; ${(left - part).toFixed(1)} is left, and she calls it in at the due time`);
+      }
+    }
+  } else console.log("  (she has no pickaxe to spare: no loan)");
   // a stake: an IOU worth 120% of it
   if ((await coins()) >= 21) {
     mk = await api("/api/market?player=" + me);

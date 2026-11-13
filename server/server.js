@@ -733,7 +733,7 @@ async function route(req, res) {
 http.createServer(route).listen(PORT, () => {
   console.log(`Tidewater Market is open: http://localhost:${PORT}`);
   console.log(`  contract  ${CONTRACT}`);
-  console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft, export and trade on the notice board)`);
+  console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft, export, trade on the notice board, note insults and call in loans)`);
   if (DEALER_ID) console.log(`  dealer    ${DEALER_ID}  (Silas: his key can only quote, ship and trade on the notice board)`);
   console.log(`  voice     ${voice === "claude" ? "Claude writes Maren's lines" : "written lines (set ANTHROPIC_API_KEY for Claude)"}`);
 });
