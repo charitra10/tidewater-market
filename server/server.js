@@ -16,7 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
-import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand, repMood, TERMS } from "./merchant.js";
+import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand, repMood, TERMS, orderPlan, staleOrders, orderWhy, auctionPlan, leastFor, offerAnswer } from "./merchant.js";
 import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
 import { tideAt, tideBidFactor, stormAt, stormBidFactor, eventAt } from "../web/tide.js";
 
@@ -77,6 +77,8 @@ const logs = {
   ious: { maren: [], silas: [] }, // investors' open IOUs, oldest first
   loans: [], // tools Maren has out on loan
   shopNews: [], // when a merchant shut up shop or opened again
+  bids: [], // Maren's wanted orders and players' offers on notices
+  bidNews: [], // auctions and orders, for the ticker
   seen: { trades: -1, blocked: -1, beacons: "", board: -1, boardSales: -1, dealerTrades: -1, dealerBlocked: -1, maren: "", silas: "", loans: -1 },
 };
 /// The contract's shop view, in coins.
@@ -91,6 +93,24 @@ const shopOf = (v) =>
     iouCount: v.iou_count,
   };
 const iouOf = (i) => ({ id: i.id, investor: i.investor, putIn: yoctoToCoins(i.put_in), owed: yoctoToCoins(i.owed), repaid: yoctoToCoins(i.repaid), at: i.at_ms });
+const toBid = (b) => ({
+  id: b.id,
+  kind: b.kind.toLowerCase(), // "order", "offer" or "auction"
+  bidder: b.bidder,
+  token: b.token_id,
+  qty: b.qty,
+  unit: yoctoToCoins(b.unit_price),
+  unitYocto: b.unit_price,
+  held: yoctoToCoins(b.held),
+  on: b.on,
+  counter: b.counter ? yoctoToCoins(b.counter) : null,
+  counterYocto: b.counter,
+  reason: b.reason,
+  placedMs: b.placed_ms,
+  expiresMs: b.expires_ms,
+});
+const toAuction = (a) =>
+  a && { id: a.id, token: a.token_id, reserve: yoctoToCoins(a.reserve), startedMs: a.started_ms, endsMs: a.ends_ms, bids: a.bids, top: a.top ? toBid(a.top) : null, settled: a.settled };
 const toListing = (l) => ({
   id: l.id,
   seller: l.seller,
@@ -110,7 +130,16 @@ async function refreshLogs(mv, dv) {
     jobs.push(near.view(CONTRACT, "get_dealer_blocked", { limit: 5 }).then((b) => ((logs.dealerBlocked = b), (logs.seen.dealerBlocked = dv.blocked_count))));
   }
   if (mv.board_version !== undefined && mv.board_version !== logs.seen.board) {
-    jobs.push(near.view(CONTRACT, "get_listings").then((l) => ((logs.listings = l.map(toListing)), (logs.seen.board = mv.board_version))));
+    // (orders and offers move the board's version too)
+    const bids = mv.bid_count !== undefined ? near.view(CONTRACT, "get_bids") : Promise.resolve([]);
+    jobs.push(
+      Promise.all([near.view(CONTRACT, "get_listings"), bids]).then(([l, b]) => {
+        logs.listings = l.map(toListing);
+        logs.bids = b.map(toBid);
+        for (const o of logs.bids) if (o.kind === "order") orderIds.add(o.id);
+        logs.seen.board = mv.board_version;
+      }),
+    );
   }
   if (mv.board_sale_count !== undefined && mv.board_sale_count !== logs.seen.boardSales) {
     jobs.push(near.view(CONTRACT, "get_board_sales", { limit: 12 }).then((b) => ((logs.boardSales = b), (logs.seen.boardSales = mv.board_sale_count))));
@@ -146,6 +175,8 @@ function feed() {
       kind: "trade",
       player: t.player,
       did: t.side === "Sell" ? "bought" : "sold", // the contract names sides from Maren's side of the counter
+      order: orderIds.has(t.id) || undefined, // filled one of her wanted orders
+      auction: auctionIds.has(t.id) || undefined, // won one of her auctions
       token: t.token_id,
       qty: t.qty,
       coins: Math.round(yoctoToCoins(t.total)),
@@ -169,6 +200,8 @@ function feed() {
     ...logs.listings.map((l) => ({ kind: "listed", player: l.seller, token: l.token, qty: l.qty, unit: l.unit, at: l.listedMs })),
     ...["maren", "silas"].flatMap((m) => logs.ious[m].map((i) => ({ kind: "invest", merchant: m, player: i.investor, coins: Math.round(i.putIn), at: i.at }))),
     ...logs.shopNews,
+    ...logs.bids.filter((b) => b.kind === "order").map((o) => ({ kind: "order", player: MERCHANT_ID, token: o.token, qty: o.qty, unit: Math.round(o.unit), for: o.reason, at: o.placedMs })),
+    ...logs.bidNews,
   ];
   return items.sort((a, b) => b.at - a.at).slice(0, 20);
 }
@@ -244,6 +277,7 @@ async function getMarket(fresh = false) {
     shop: shopOf(mv.shop),
     insurance: mv.insurance && { premiums: yoctoToCoins(mv.insurance.premiums), payouts: yoctoToCoins(mv.insurance.payouts), coversSold: mv.insurance.covers_sold, claimsPaid: mv.insurance.claims_paid },
     loansOut: mv.loans_out ?? 0,
+    auction: toAuction(mv.auction),
     dealer: dv && {
       id: dv.account_id,
       stock: byToken(dv.stock),
@@ -260,6 +294,7 @@ async function getMarket(fresh = false) {
     },
   };
   noteShops(market);
+  noteAuction(market.auction);
   if (market.dealer) Object.assign(market.dealer, { tide: market.tide, storm: market.storm });
   remember(market);
   cache = { at: Date.now(), market };
@@ -283,6 +318,31 @@ function noteShops(market) {
     logs.shopNews.unshift({ kind: "shop", merchant: who, player: who === "silas" ? DEALER_ID : MERCHANT_ID, closed: shop.closed, at: Date.now() });
     logs.shopNews.length = Math.min(logs.shopNews.length, 4);
   }
+}
+
+// Her orders and auctions, by id, so the ticker can say a deal filled an order or won an auction.
+const orderIds = new Set();
+const auctionIds = new Set();
+// Why she posted each order (kept in memory, like her notices' reasons).
+const orderReasons = new Map();
+/// Say so when an auction starts, gets a new top bid, or ends.
+let auctionSeen = "";
+function noteAuction(a) {
+  if (!a) return;
+  auctionIds.add(a.id);
+  const key = `${a.id}:${a.bids}:${a.settled}`;
+  if (key === auctionSeen) return;
+  const first = auctionSeen === "";
+  auctionSeen = key;
+  if (first) return; // (what happened before a restart is old news)
+  const lens = a.token === "beacon" ? "beacon lens" : a.token;
+  const coins = a.top ? Math.round(a.top.unit) : 0;
+  if (a.settled) addNews(a.top ? `${whoName(a.top.bidder)} won Maren's ${lens} at auction for ${coins} coins.` : `Nobody bid for Maren's ${lens}: it's back on her shelf.`);
+  else if (a.top) addNews(`${whoName(a.top.bidder)} bid ${coins} coins for Maren's ${lens}.`);
+  else addNews(`Maren is auctioning her last ${lens}: bids from ${Math.round(a.reserve)} coins, for five minutes.`);
+  const kind = a.settled ? "auction_won" : a.top ? "auction_bid" : "auction";
+  logs.bidNews.unshift({ kind, player: a.top?.bidder ?? MERCHANT_ID, token: a.token, coins: coins || Math.round(a.reserve), at: Date.now() });
+  logs.bidNews.length = Math.min(logs.bidNews.length, 4);
 }
 
 const merchantCall = (method, args) =>
@@ -339,6 +399,12 @@ async function workshopTick() {
       if (r) addNews(`Maren called in ${whoName(l.player)}'s overdue loan: ${r.value === "repossessed" ? `she took the ${l.token_id} back` : "the tool was gone, so she wrote it off"}.`);
     }
     const silasIn = dealerHere(market) && !market.dealer.shop?.closed;
+    // an auction whose time is up is settled, shut or not (anyone may; she does it)
+    const a = market.auction;
+    if (a && !a.settled && Date.now() > a.endsMs + 2000) {
+      await tryCall("settle", merchantCall("settle_auction", {}));
+      market = await getMarket(true);
+    }
     if (market.shop?.closed) {
       // her stall is shut: no notices, no workshop, no buying; Silas may still trade
       if (silasIn) await dealerTick(market);
@@ -355,6 +421,8 @@ async function workshopTick() {
         if (r?.value.status === "listed") addNews(`Maren pinned ${lot(n.token, n.qty)} on the notice board at ${n.unit} each: Silas pays more than the mainland.`);
       }
     }
+    if (cache.at === 0) market = await getMarket(true);
+    await bidTick(market); // her orders, her auction, and offers on her notices
     if (cache.at === 0) market = await getMarket(true);
     // craft what is missing and export the rest of the surplus (promised goods stay)
     const free = minus(market.stock, promisedBy(logs.listings, MERCHANT_ID, Date.now()));
@@ -383,6 +451,51 @@ async function workshopTick() {
 
 /// Silas between customers: pins pearls for Maren when she pays more than the
 /// city, buys cheap ore and pearls off the board, and ships a full hold.
+/// Maren's bids between customers: orders for what she lacks to make what she
+/// has run out of (taken down once she has it), an auction for her last lens
+/// while players are about, and answers to offers on her notices.
+async function bidTick(market) {
+  const orders = logs.bids.filter((b) => b.kind === "order");
+  const stale = staleOrders(market, orders);
+  for (const o of stale) {
+    const r = await tryCall("cancel order", merchantCall("cancel_order", { id: o.id }));
+    if (r) addNews(`Maren took down her order for ${o.token === "pearl" ? "pearls" : o.token}: she has what she needed.`);
+  }
+  const open = orders.filter((o) => !stale.includes(o));
+  for (const o of orderPlan(market, open, Date.now())) {
+    const r = await tryCall("order", merchantCall("post_order", { token_id: o.token, qty: o.qty, unit_price: coinsToYoctoStr(o.unit), reason: o.for, expires_ms: o.expiresMs }));
+    if (r?.value.status === "posted") {
+      orderReasons.set(r.value.bid.id, o.why);
+      addNews(`Maren wants ${lot(o.token, o.qty)} for a ${o.for === "beacon" ? "beacon lens" : o.for}: ${o.unit} each until high tide.`);
+    } else if (r) console.log(`  · the ledger refused Maren's order: ${r.value.reason}`);
+  }
+  const plan = auctionPlan(market, market.auction, Date.now(), { active: Date.now() - lastActivity < 3 * 60_000 });
+  if (plan) await tryCall("auction", merchantCall("start_auction", { token_id: plan.token, reserve: coinsToYoctoStr(plan.reserve), ends_ms: plan.endsMs }));
+  await answerOffers("maren", market);
+}
+
+/// A merchant answers the offers on their notices: takes them if they are
+/// enough, counters if they are close, turns them down otherwise (merchant.js
+/// decides; the contract's floor or cost rule still applies).
+async function answerOffers(who, market) {
+  const self = who === "silas" ? DEALER_ID : MERCHANT_ID;
+  const send = who === "silas" ? dealerCall : merchantCall;
+  const name = who === "silas" ? "Silas" : "Maren";
+  for (const b of logs.bids.filter((x) => x.kind === "offer" && !x.counter).slice(0, 3)) {
+    const l = logs.listings.find((x) => x.id === b.on && x.seller === self);
+    if (!l) continue;
+    const a = offerAnswer({ offer: b.unit, ask: l.unit, least: leastFor(who, market, l.token) });
+    const args = { id: b.id, answer: a.answer, counter: a.counter ? coinsToYoctoStr(a.counter) : null };
+    let r = await tryCall("answer", send("answer_offer", args));
+    if (r?.value.status === "blocked") r = await tryCall("answer", send("answer_offer", { id: b.id, answer: "decline", counter: null }));
+    const offer = `${whoName(b.bidder)}'s offer of ${n0(b.unit)} each for ${lot(l.token, b.qty)}`;
+    if (r?.value.status === "sold") addNews(`${name} took ${offer}.`);
+    else if (r?.value.status === "countered") addNews(`${name} countered ${offer}: ${a.counter} each.`);
+    else if (r?.value.status === "declined") addNews(`${name} turned down ${offer}.`);
+  }
+}
+const n0 = (v) => String(Math.round(v * 10) / 10);
+
 async function dealerTick(market) {
   for (const n of silasNotices(market, promisedBy(logs.listings, DEALER_ID, Date.now()))) {
     const r = await tryCall("pin", dealerCall("dealer_list_item", { token_id: n.token, qty: n.qty, unit_price: coinsToYoctoStr(n.unit) }));
@@ -394,6 +507,7 @@ async function dealerTick(market) {
     if (r?.value.status === "bought") addNews(`Silas bought ${lot(pick.token, pick.qty)} off ${whoName(pick.seller)}'s notice for ${Math.round(pick.total)} coins.`);
     else if (r) console.log(`  · the ledger refused Silas's board buy: ${r.value.reason}`);
   }
+  await answerOffers("silas", market);
   if (cache.at === 0) market = await getMarket(true);
   for (const job of shipPlan(market.dealer, market.mainland, promisedBy(logs.listings, DEALER_ID, Date.now()))) {
     const r = await tryCall("ship", dealerCall("ship", { token_id: job.token, qty: job.qty }));
@@ -494,6 +608,10 @@ async function haggleApi(body) {
     } else {
       if (side === "sell") {
         if (!WARES.includes(token)) return reply(line("wont_sell", { token }));
+        const a = market.auction;
+        if (a && !a.settled && a.token === token && market.stock[token] <= 1) {
+          return reply(line("at_auction", { top: a.top ? Math.round(a.top.unit) : 0, reserve: Math.round(a.reserve), endsIn: inMinutes(a.endsMs - Date.now()) }));
+        }
         if (market.stock[token] < qty) return reply(line("no_stock", { token }));
       } else {
         if (!RAW.includes(token)) return reply(line("wont_buy", { token }));
@@ -680,6 +798,11 @@ async function route(req, res) {
         players: market.playerCount,
         deals: market.tradeCount,
         notices: { listings: logs.listings.map((l) => (noticeWhy.has(l.id) ? { ...l, why: noticeWhy.get(l.id) } : l)), sales: logs.boardSales.slice(0, 5).map((b) => ({ ...b, maren: b.buyer === MERCHANT_ID })) },
+        bids: {
+          orders: logs.bids.filter((b) => b.kind === "order").map((o) => ({ ...o, why: orderReasons.get(o.id) ?? orderWhy({ token: o.token, qty: o.qty, for: o.reason }) })),
+          offers: logs.bids.filter((b) => b.kind === "offer"),
+        },
+        auction: market.auction,
         value: VALUE,
         dealer: dealerHere(market)
           ? {

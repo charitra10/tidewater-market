@@ -6,7 +6,7 @@
 //
 // All prices here are whole "coins" (1 coin = 0.001 NEAR).
 
-import { tideBidFactor, stormBidFactor, eventBidFactor, eventAskFactor, EVENT_TEXT } from "../web/tide.js";
+import { tideBidFactor, stormBidFactor, eventBidFactor, eventAskFactor, EVENT_TEXT, nextTide, TIDE_PERIOD_MS } from "../web/tide.js";
 
 export const TOKENS = ["kelp", "driftwood", "ore", "pearl", "rope", "pickaxe", "boat", "beacon"];
 export const RAW = ["kelp", "driftwood", "ore", "pearl"]; // she buys these
@@ -40,6 +40,14 @@ export const TERMS = {
   loanWithholdPct: 50, // half of the borrower's takings go to the loan
   coverPremium: 15,
   coverPayout: 45,
+  maxOffersPerPlayer: 3, // offers a player may have out at once
+  offerTtlMs: 60 * 60 * 1000, // an offer lapses after an hour (or when its notice comes down)
+  maxOrders: 3, // Maren's wanted orders out at once
+  orderMaxMs: 60 * 60 * 1000,
+  bidStepPct: 5, // each auction bid beats the last by this much
+  auctionExtendMs: 30 * 1000, // a bid this close to the end keeps it open this much longer
+  auctionMinMs: 60 * 1000,
+  auctionMaxMs: 30 * 60 * 1000,
 };
 
 /// A player's name in the village (the contract's reputation score) in words,
@@ -698,4 +706,106 @@ export function dealerPicks(dealer, listings, now, self = null) {
     spent += total;
   }
   return picks;
+}
+
+// ---------------------------------------------------------------------------
+// Bids: Maren's wanted orders, her auctions, and both merchants' answers to
+// offers on their notices
+// ---------------------------------------------------------------------------
+
+/// An order pays this much over her usual bid: worth a special trip.
+export const ORDER_PREMIUM = 1.2;
+const what = (t) => (t === "beacon" ? "beacon lens" : t);
+
+/// The raw goods she is short of to make one more of something she has run
+/// out of: { out, short: { token: qty } } for the first such thing, or null.
+/// Rope counts as the kelp it is twisted from.
+export function shortfall(market) {
+  for (const out of ["boat", "beacon", "pickaxe"]) {
+    if (market.stock[out] >= TARGET[out]) continue;
+    const short = {};
+    let kelpForRope = 0;
+    for (const [t, n] of Object.entries(RECIPES[out])) {
+      if (t === "rope") kelpForRope = Math.max(0, n - market.stock.rope) * RECIPES.rope.kelp;
+      else if (market.stock[t] < n) short[t] = n - market.stock[t];
+    }
+    if (kelpForRope > market.stock.kelp) short.kelp = kelpForRope - market.stock.kelp;
+    if (Object.keys(short).length) return { out, short };
+  }
+  return null;
+}
+
+/// When her order should run until: the next high tide at least 3 minutes away.
+export function orderDeadline(now) {
+  let h = nextTide(now + 3 * 60_000, "high");
+  if (h < now + 3 * 60_000) h += TIDE_PERIOD_MS;
+  return h;
+}
+
+/// Orders she should post now: for each raw good she is short of to make
+/// what she has run out of (and has no order out for), the shortfall at 20%
+/// over her usual bid, never past her ceiling, until the next high tide.
+/// `orders`: her open orders, [{ token }]. Returns [{ token, qty, unit, for, expiresMs, why }].
+export function orderPlan(market, orders, now, max = TERMS.maxOrders) {
+  if (market.shop?.closed || market.frozen) return [];
+  const need = shortfall(market);
+  if (!need) return [];
+  const out = [];
+  for (const [token, qty] of Object.entries(need.short)) {
+    if (orders.length + out.length >= max) break;
+    if (orders.some((o) => o.token === token)) continue;
+    const bid = unitBid(market, token);
+    if (!(bid > 0)) continue; // (a red tide's kelp: she wants none of it)
+    const unit = Math.min(Math.ceil(bid * ORDER_PREMIUM), Math.floor(market.ceiling[token] ?? Infinity));
+    if (unit * qty > market.treasury) continue;
+    out.push({ token, qty, unit, for: need.out, expiresMs: orderDeadline(now), why: orderWhy({ token, qty, for: need.out }, bid) });
+  }
+  return out;
+}
+
+/// Why she wants it, in words (shown on the order).
+export function orderWhy(order, bid) {
+  return `Maren is out of ${what(order.for)}s and needs ${order.qty} more ${order.token === "pearl" ? "pearls" : order.token} to make one. She pays ${Math.round((ORDER_PREMIUM - 1) * 100)}% over her usual bid${bid ? ` (about ${n1(bid)})` : ""} until high tide.`;
+}
+
+/// Her orders that are no longer needed (she has what she wanted for it).
+export function staleOrders(market, orders) {
+  const need = shortfall(market);
+  return orders.filter((o) => !need || !need.short[o.token]);
+}
+
+/// How long an auction runs, and how long she waits after one before the next.
+export const AUCTION_MS = 5 * 60_000;
+export const AUCTION_REST_MS = 10 * 60_000;
+
+/// Whether to auction her last beacon lens now: only her last one, none
+/// running, not straight after the last, and someone around to bid.
+/// Returns { token, reserve, endsMs, why } or null.
+export function auctionPlan(market, auction, now, { active = true } = {}) {
+  if (!active || market.shop?.closed || market.frozen) return null;
+  if (market.stock.beacon !== 1) return null;
+  if (auction && (!auction.settled || now - auction.endsMs < AUCTION_REST_MS)) return null;
+  const reserve = Math.max(Math.ceil(market.floor.beacon ?? 0), Math.ceil((market.avgCost.beacon ?? 0) * 1.15));
+  return { token: "beacon", reserve, endsMs: now + AUCTION_MS, why: `Her last beacon lens goes to the highest bidder. She won't take less than ${reserve}: what it cost her, plus 15%.` };
+}
+
+/// The least a merchant takes for goods off their own notice: Maren no less
+/// than her floor, what the goods cost her, or what the mainland would pay;
+/// Silas no less than what they cost him, or what the city would pay.
+export function leastFor(who, market, token) {
+  if (who === "silas") {
+    const d = market.dealer;
+    return Math.ceil(Math.max(d.avgCost?.[token] ?? 0, (d.cityPrice?.[token] ?? 0) + 1));
+  }
+  return Math.ceil(Math.max(market.floor[token] ?? 0, market.avgCost[token] ?? 0, (market.exportPrice?.[token] ?? 0) + 1));
+}
+
+/// A merchant's answer to an offer of `offer` each on a notice asking `ask`,
+/// when the least they take is `least`: take it if it is enough; if it is
+/// close (within 20%), counter at their least; otherwise turn it down.
+export function offerAnswer({ offer, ask, least }) {
+  if (offer >= least) return { answer: "accept" };
+  // a counter goes between the offer and the asking price, and never under their least
+  if (offer >= least * 0.8 && least < ask) return { answer: "counter", counter: least };
+  return { answer: "decline" };
 }

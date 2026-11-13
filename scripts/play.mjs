@@ -257,6 +257,70 @@ await call("cancel_listing", { id: mine.id });
 p = await player();
 check(have(p, ware) === held && p.on_board[TOK.indexOf(ware)] === 0, `took the notice down: the ${ware} came back`);
 
+// Offers: less than a notice asks, held by the contract until the seller answers.
+console.log(`\n▸ Offers on the notice board`);
+let theirStuff = (await near.view(cfg.contract, "get_player", { account_id: neighbour })).items;
+for (let i = 0; i < 3 && theirStuff[0] + theirStuff[1] === 0; i++) {
+  await ncall("forage", { spot: "shore" });
+  theirStuff = (await near.view(cfg.contract, "get_player", { account_id: neighbour })).items;
+}
+const spare = theirStuff[0] >= theirStuff[1] ? "kelp" : "driftwood";
+const ask = 10;
+const lot2 = (await ncall("list_item", { token_id: spare, qty: 1, unit_price: coinsToYocto(ask).toString() })).value;
+say("them", `pinned 1 ${spare} at ${ask} coins`);
+const myBids = () => near.view(cfg.contract, "get_bids").then((b) => b.filter((x) => x.bidder === me));
+const bidsWhen = async (ok) => {
+  for (let i = 0; i < 20; i++) {
+    const b = await myBids();
+    if (ok(b)) return b;
+    await sleep(1000);
+  }
+  return myBids();
+};
+// an offer, then taken back: the coins come home
+await sleep(2600);
+let before = await coins();
+const first = (await call("make_offer", { listing_id: lot2.id, qty: 1, unit_price: coinsToYocto(4).toString() }, coinsToYocto(4))).value;
+say("me", `offered 4 for it; the contract holds my 4 coins`);
+await call("withdraw_offer", { id: first.id });
+await bidsWhen((b) => !b.some((x) => x.id === first.id));
+await sleep(2600);
+const back = await coins();
+check(Math.abs(back - before) < 1, `withdrew the offer: my coins came back (purse ${before.toFixed(1)} → ${back.toFixed(1)}, less gas)`);
+// an offer, a counter, and a deal at the counter-price
+const offer = (await call("make_offer", { listing_id: lot2.id, qty: 1, unit_price: coinsToYocto(5).toString() }, coinsToYocto(5))).value;
+say("me", `offered 5 for the ${spare}`);
+await bidsWhen((b) => b.some((x) => x.id === offer.id));
+const answered = (await ncall("answer_offer", { id: offer.id, answer: "counter", counter: coinsToYocto(7).toString() })).value;
+say("them", `countered: 7`);
+check(answered.status === "countered", "the neighbour countered at 7, between my offer and their price");
+await bidsWhen((b) => b.some((x) => x.id === offer.id && x.counter));
+await sleep(2600);
+const theirsBefore = await near.balance(neighbour);
+held = have(await player(), spare);
+await call("accept_counter", { id: offer.id }, coinsToYocto(2));
+say("me", "took it: paid the 2 coins' difference");
+await sleep(2600);
+const theirGain = yoctoToCoins((await near.balance(neighbour)) - theirsBefore);
+for (let i = 0; i < 10 && have((p = await player()), spare) !== held + 1; i++) await sleep(1000);
+check(have(p, spare) === held + 1 && Math.abs(theirGain - 7) < 0.01, `the ${spare} is mine, and the neighbour got 7 coins (their purse +${theirGain.toFixed(1)})`);
+
+// Maren's wanted orders: fill one if she has one out and I have the goods
+const wanted = (await api("/api/market?player=" + me)).bids?.orders ?? [];
+if (!wanted.length) console.log("  (Maren has no orders out right now)");
+for (const o of wanted) {
+  say("Maren", `wants ${o.qty} ${o.token} for a ${o.reason}, ${o.unit.toFixed(1)} each`);
+  const mineNow = have(await player(), o.token);
+  if (mineNow === 0) continue;
+  const q = Math.min(mineNow, o.qty);
+  before = await coins();
+  const t = (await call("fill_order", { id: o.id, qty: q })).value;
+  await sleep(2600);
+  const got = (await coins()) - before;
+  check(Math.abs(yoctoToCoins(t.total) - q * o.unit) < 0.01 && got > q * o.unit - 1, `filled her order: ${q} ${o.token} for ${(q * o.unit).toFixed(1)} coins`);
+  break;
+}
+
 // Maren reads the board too: ore priced under her bid gets bought from her treasury.
 const oreBid = (await api("/api/market?player=" + me)).history.prices.ore.at(-1);
 const orePrice = Math.max(1, Math.floor(oreBid * 0.9));

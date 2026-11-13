@@ -744,7 +744,9 @@ function drawNoticeBoard(ctx, t, S) {
   ctx.fill();
   ctx.fillStyle = "#9c452f";
   ctx.fillRect(x - 50, y - 90, 100, 4);
-  const notes = (S.board ?? []).slice(0, 8);
+  // Maren's wanted orders first, on yellow paper with a red band
+  const wanted = (S.orders ?? []).slice(0, 3);
+  const notes = [...wanted.map((o) => ({ ...o, wanted: true })), ...(S.board ?? [])].slice(0, 8);
   notes.forEach((n, i) => {
     const row = Math.floor(i / 4);
     const nx = x - 28 + (i % 4) * 18 + (row ? 4 : 0);
@@ -755,8 +757,12 @@ function drawNoticeBoard(ctx, t, S) {
     ctx.rotate((((n.id * 37) % 9) - 4) * 0.035 + sway);
     ctx.fillStyle = "rgba(60,40,20,0.25)";
     ctx.fillRect(-6, -8, 14, 18);
-    ctx.fillStyle = "#fbf6e8";
+    ctx.fillStyle = n.wanted ? "#f7e3a1" : "#fbf6e8";
     ctx.fillRect(-7, -9, 14, 18);
+    if (n.wanted) {
+      ctx.fillStyle = "#b5392b";
+      ctx.fillRect(-7, -9, 14, 4);
+    }
     const img = iconImage(n.token);
     if (img.complete) ctx.drawImage(img, -6, -5, 12, 12);
     ellipse(ctx, 0, -7, 1.7, 1.7, "#c0392b");
@@ -842,6 +848,14 @@ function drawStall(ctx, t, S) {
   ctx.fillRect(x + 71, 318, 2, 14);
   ellipse(ctx, x + 72, 338, 7, 8, `rgba(255,205,96,${shut ? 0.15 : glow})`);
   if (shut) handSign(ctx, x, 380, "CLOSED", "needs an investor", Math.sin(t * 1.2) * 0.03);
+  else if (S.auction && S.auction.endsMs > Date.now()) {
+    // her last lens is up for auction: a sign on a post beside the stall
+    const left = Math.max(0, S.auction.endsMs - Date.now());
+    const clock = `${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, "0")}`;
+    ctx.fillStyle = "#6b4a2b";
+    ctx.fillRect(x - 124, 346, 5, 58);
+    handSign(ctx, x - 122, 340, "AUCTION", S.auction.top ? `top bid ${Math.round(S.auction.top.unit)} · ${clock}` : `last lens · ${clock}`, Math.sin(t * 1.4) * 0.04);
+  }
 }
 
 /// A hand-written sign hanging on a nail.

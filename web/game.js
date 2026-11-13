@@ -222,6 +222,8 @@ function ago(ms) {
 function eventText(e) {
   const name = who(e.player);
   const merchant = e.merchant === "silas" ? "Silas" : "Maren";
+  if (e.kind === "trade" && e.order) return `${name} filled Maren's order: ${lot(e.token, e.qty)} for ${e.coins} coins`;
+  if (e.kind === "trade" && e.auction) return `${name} won Maren's ${NAMES[e.token].toLowerCase()} at auction for ${e.coins} coins`;
   if (e.kind === "trade") return `${name} ${e.did} ${lot(e.token, e.qty)} ${e.did === "sold" ? "to" : "from"} ${merchant} for ${e.coins} coins`;
   if (e.kind === "board_sale") {
     const buyer = name; // (Maren and Silas buy off the board too)
@@ -235,6 +237,10 @@ function eventText(e) {
     return `The ledger stopped a deal with ${name}: ${e.reason.replace(/_/g, " ")}`;
   }
   if (e.kind === "invest") return `${name} invested ${e.coins} coins in ${merchant}`;
+  if (e.kind === "order") return `Maren wants ${lot(e.token, e.qty)} for a ${e.for === "beacon" ? "beacon lens" : e.for}: ${e.unit} each until high tide`;
+  if (e.kind === "auction") return `Maren is auctioning her last ${NAMES[e.token].toLowerCase()}: bids from ${e.coins} coins`;
+  if (e.kind === "auction_bid") return `${name} bid ${e.coins} coins for Maren's ${NAMES[e.token].toLowerCase()}`;
+  if (e.kind === "auction_won") return `${name} won Maren's ${NAMES[e.token].toLowerCase()} at auction for ${e.coins} coins`;
   if (e.kind === "shop") return e.closed ? `${merchant}'s purse ran dry: ${e.merchant === "silas" ? "he's gone to raise money" : "her stall is shut"} until someone invests` : `${merchant} is open for business again`;
   return `${name} relit the lighthouse!`;
 }
@@ -585,7 +591,10 @@ function refresh(fresh = false) {
       S.dealer = Boolean(market?.dealer);
       S.shut = { maren: Boolean(market?.shops?.maren?.closed), silas: Boolean(market?.shops?.silas?.closed) };
       S.board = (market?.notices?.listings ?? []).filter((l) => l.expiresMs > Date.now());
+      S.orders = market?.bids?.orders ?? [];
+      S.auction = market?.auction?.settled === false ? market.auction : null;
       tellSellerNews();
+      tellBidNews();
       renderHud();
       updateTicker();
       if (S.shopOpen) renderShop();
@@ -933,6 +942,11 @@ function renderShop() {
         if (used) sub += ` <b>${who(used.seller)} has one on the notice board for ${fmt(used.unit)}.</b>`;
       } else sub = `${w.stock} on the shelf. ${sub}`;
       if (mine > 0) sub += ` <b>You have ${mine}.</b>`;
+      const a = m.auction;
+      if (a && !a.settled && a.token === w.token && w.stock <= 1) {
+        html += auctionRow(a);
+        continue;
+      }
       html += `<div class="item">${ICONS[w.token]}<div><div class="name">${NAMES[w.token]}${trend(w.token, false)}</div><div class="sub">${sub}</div></div>
         <div class="buy">${w.price ? `<button class="p why" data-why="ask:${w.token}" aria-describedby="why" title="Why this price?">${w.price}</button><button class="btn small" data-open="sell" data-token="${w.token}" data-qty="1">Haggle</button>` : ""}</div></div>`;
     }
@@ -1286,6 +1300,153 @@ function closeNotices() {
   $("notices").hidden = true;
 }
 
+// ---------- bids: Maren's orders, offers on notices, her auctions ----------
+const bidsNow = () => S.market?.bids ?? { orders: [], offers: [] };
+const offersOn = (id) => bidsNow().offers.filter((b) => b.on === id);
+const myOffer = (id) => offersOn(id).find((b) => mine(b.bidder));
+const forWhat = (t) => (t === "beacon" ? "a beacon lens" : `a ${t}`);
+const until = (ms) => {
+  const m = Math.max(0, Math.round((ms - Date.now()) / 60000));
+  return m < 1 ? "for a moment more" : `for ${m} more min`;
+};
+let offerEdit = null; // { id, qty, price }: an offer being written on someone's notice
+let counterEdit = null; // { id, price }: a counter-offer being written on one of yours
+
+/// One of Maren's wanted orders.
+function orderRow(o) {
+  const have = pv.items[idx(o.token)];
+  const q = Math.min(have, o.qty);
+  const usual = marenBid(o.token);
+  const right = q > 0 ? `<button class="btn small gold" data-fill="${o.id}" data-qty="${q}" ${busy ? "disabled" : ""}>Fill ${q} for ${fmt(q * o.unit)}</button>` : `<span class="sub">you have none</span>`;
+  return `<div class="item order">${ICONS[o.token]}<div><div class="name">Wanted: ${o.qty} × ${NAMES[o.token]} <span class="each">${fmt(o.unit)} each</span></div>
+    <div class="sub">Maren, for ${forWhat(o.reason)} · until high tide, ${until(o.expiresMs)}${usual ? ` · <span class="good">she usually pays about ${fmt(usual)}</span>` : ""}</div>
+    <div class="sub why-line">${o.why}</div></div><div class="buy">${right}</div></div>`;
+}
+
+/// Under someone else's notice: your offer on it, or the form to make one.
+function offerLine(l) {
+  const mineNow = myOffer(l.id);
+  if (mineNow) {
+    const held = `${mineNow.qty} at ${fmt(mineNow.unit)} each (${fmt(mineNow.held)} held)`;
+    if (mineNow.counter) {
+      const more = (mineNow.counter - mineNow.unit) * mineNow.qty;
+      return `<div class="offer-line"><span>Your offer: ${held}. <b>${who(l.seller)} countered: ${fmt(mineNow.counter)} each.</b></span>
+        <button class="btn small" data-take-counter="${mineNow.id}" ${more > coins || busy ? "disabled" : ""}>Pay ${fmt(more)} more</button><button class="btn small plain" data-withdraw="${mineNow.id}" ${busy ? "disabled" : ""}>Withdraw</button></div>`;
+    }
+    return `<div class="offer-line"><span>Your offer: ${held}. Waiting for ${who(l.seller)}.</span><button class="btn small plain" data-withdraw="${mineNow.id}" ${busy ? "disabled" : ""}>Withdraw</button></div>`;
+  }
+  if (offerEdit?.id !== l.id) return "";
+  const total = offerEdit.qty * offerEdit.price;
+  const qty = l.qty > 1 ? `<span class="qty"><button data-oq="-1">−</button>${offerEdit.qty}<button data-oq="1">+</button></span>` : "";
+  return `<div class="offer-line edit">${qty}<button class="step" data-op="-1">−</button><b>${offerEdit.price}</b><button class="step" data-op="1">+</button><span class="sub">each</span>
+    <button class="btn small" data-offer-go="${l.id}" ${total > coins || busy ? "disabled" : ""}>Offer ${total}</button>
+    <span class="sub">The ${total} coins wait with the contract until ${who(l.seller)} answers, and come back if they say no.</span></div>`;
+}
+
+/// Under your notice: the offers on it, to take, counter or turn down.
+function offersFor(l) {
+  return offersOn(l.id)
+    .map((b) => {
+      const editing = counterEdit?.id === b.id;
+      const head = `<span><b>${who(b.bidder)}</b> offers ${fmt(b.unit)} each for ${b.qty} (${fmt(b.held)} held)${b.counter ? `. You countered at ${fmt(b.counter)}; waiting for them.` : ""}</span>`;
+      const counter = editing
+        ? `<button class="step" data-cp="-1">−</button><b>${counterEdit.price}</b><button class="step" data-cp="1">+</button><button class="btn small" data-counter-go="${b.id}" ${busy ? "disabled" : ""}>Counter at ${counterEdit.price}</button>`
+        : b.counter
+          ? ""
+          : `<button class="btn small plain" data-counter="${b.id}" ${busy || l.unit - b.unit < 2 ? "disabled" : ""}>Counter</button>`;
+      return `<div class="offer-line theirs">${head}<button class="btn small" data-accept="${b.id}" ${busy || b.qty > l.qty ? "disabled" : ""}>Accept ${fmt(b.unit * b.qty)}</button>${counter}<button class="btn small plain" data-decline="${b.id}" ${busy ? "disabled" : ""}>Decline</button></div>`;
+    })
+    .join("");
+}
+
+/// Her last lens at auction, in the stall's Buy list.
+let bidAmt = 0;
+const minBid = (a) => (a.top ? Math.ceil((a.top.unit * (100 + (S.market?.terms?.bidStepPct ?? 5))) / 100) : Math.ceil(a.reserve));
+function auctionRow(a) {
+  const least = minBid(a);
+  if (bidAmt < least) bidAmt = least;
+  const left = Math.max(0, a.endsMs - Date.now());
+  const clock = `${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, "0")}`;
+  const lead = a.top ? (mine(a.top.bidder) ? `<b>Your bid of ${fmt(a.top.unit)} is the highest.</b> If someone beats it, your coins come straight back.` : `Top bid ${fmt(a.top.unit)} by ${who(a.top.bidder)}.`) : `No bids yet; ${fmt(a.reserve)} opens it.`;
+  const ended = left === 0;
+  return `<div class="item auction">${ICONS[a.token]}<div><div class="name">${NAMES[a.token]} <span class="tag">AUCTION · ${ended ? "closing" : clock}</span></div>
+    <div class="sub">Her last one goes to the highest bidder. ${lead} Each bid beats the last by ${S.market?.terms?.bidStepPct ?? 5}%; a bid in the last 30 seconds keeps it open 30 more.</div></div>
+    <div class="buy">${ended ? "" : `<span class="qty"><button data-bid-step="-10">−</button>${bidAmt}<button data-bid-step="10">+</button></span><button class="btn small gold" data-bid-go ${bidAmt > coins || busy ? "disabled title='Not enough coins'" : ""}>Bid ${bidAmt}</button>`}</div></div>`;
+}
+
+async function bidAuction() {
+  const a = S.market?.auction;
+  if (!a || busy) return;
+  const amt = bidAmt;
+  busy = true;
+  S.busyText = "Raising a hand";
+  renderShop();
+  try {
+    await call("bid_auction", { id: a.id }, coinsToYocto(amt), `Bid ${amt} for Maren's ${NAMES[a.token].toLowerCase()}`);
+    coins = Math.max(0, coins - amt);
+    toast(`You bid ${amt}. The coins are held until the auction closes; if someone outbids you, they come straight back.`, false, 7000);
+    sfx.coin();
+    bidNews.top = me;
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    busy = false;
+    S.busyText = "";
+    lastList = "";
+    setTimeout(() => refresh(true), 700);
+  }
+}
+
+/// Offers, counters, orders and auctions that concern you, said once as they happen.
+const bidNews = { offers: null, mine: null, top: null, auction: null };
+function tellBidNews() {
+  const b = bidsNow();
+  const onMine = b.offers.filter((o) => S.board.some((l) => l.id === o.on && mine(l.seller)));
+  const ids = new Set(onMine.map((o) => o.id));
+  if (bidNews.offers) {
+    for (const o of onMine.filter((o) => !bidNews.offers.has(o.id))) {
+      const l = S.board.find((x) => x.id === o.on);
+      toast(`${who(o.bidder)} offers ${fmt(o.unit)} each for your ${yourLot(o.token, o.qty)} (you asked ${fmt(l.unit)}). Answer it at the notice board.`, false, 8000);
+    }
+  }
+  bidNews.offers = ids;
+  const mineOut = new Map(b.offers.filter((o) => mine(o.bidder)).map((o) => [o.id, o]));
+  if (bidNews.mine) {
+    for (const [id, was] of bidNews.mine) {
+      const now = mineOut.get(id);
+      if (now?.counter && !was.counter) toast(`Your offer was countered: ${fmt(now.counter)} each. Take it or leave it at the notice board.`, false, 8000);
+      if (!now && !was.gone) {
+        const got = pv.items[idx(was.token)] >= (bidNews.bag?.[was.token] ?? 0) + was.qty;
+        toast(got ? `Your offer was accepted: ${yourLot(was.token, was.qty)} for ${fmt(was.unit * was.qty)}.` : `Your offer on ${yourLot(was.token, was.qty)} was turned down or ran out. The ${fmt(was.held)} coins came back to you.`, false, 7000);
+      }
+    }
+  }
+  bidNews.mine = mineOut;
+  bidNews.bag = Object.fromEntries(TOKENS.map((t) => [t, pv?.items[idx(t)] ?? 0]));
+  // the auction: outbid, won, or lost
+  const a = S.market?.auction;
+  if (a) {
+    const topNow = a.top?.bidder ?? null;
+    if (bidNews.auction === a.id && bidNews.top && mine(bidNews.top) && topNow && !mine(topNow) && !a.settled) {
+      toast(`You've been outbid: ${who(topNow)} bid ${fmt(a.top.unit)}. Your coins came back.`, true, 7000);
+    }
+    if (bidNews.auction === a.id && !bidNews.settled && a.settled && topNow && mine(topNow)) {
+      toast(`You won Maren's ${NAMES[a.token].toLowerCase()} for ${fmt(a.top.unit)} coins!`, false, 8000);
+      sfx.found?.();
+    }
+    bidNews.auction = a.id;
+    bidNews.top = topNow;
+    bidNews.settled = a.settled;
+  }
+}
+
+async function bidTx(text, method, args, deposit, label) {
+  const res = await boardTx(text, method, args, deposit, label);
+  offerEdit = null;
+  counterEdit = null;
+  return res;
+}
+
 /// One notice in the "For sale" list.
 function noticeRow(l) {
   const yours = mine(l.seller);
@@ -1307,9 +1468,11 @@ function noticeRow(l) {
   else {
     const stepper = l.qty > 1 ? `<span class="qty"><button data-bq="${l.id}" data-d="-1">−</button>${q}<button data-bq="${l.id}" data-d="1">+</button></span>` : "";
     right = `${stepper}<button class="btn small" data-buy="${l.id}" data-qty="${q}" ${total > coins ? "disabled title='Not enough coins'" : ""}>Buy for ${fmt(total)}</button>`;
+    if (!myOffer(l.id) && l.unit > 1) right += `<button class="btn small plain" data-offer="${l.id}" title="Offer less: your coins are held until they answer">Offer</button>`;
   }
-  return `<div class="item${yours ? " yours" : ""}">${ICONS[l.token]}<div><div class="name">${l.qty} × ${NAMES[l.token]} <span class="each">${fmt(l.unit)} each</span></div>
-    <div class="sub">${yours ? "<b>Your notice</b>" : who(l.seller)} · ${when} · ${compare}</div></div><div class="buy">${right}</div></div>`;
+  const extra = yours ? offersFor(l) : live(l) ? offerLine(l) : "";
+  return `<div class="item${yours ? " yours" : ""}${extra ? " with-offers" : ""}">${ICONS[l.token]}<div><div class="name">${l.qty} × ${NAMES[l.token]} <span class="each">${fmt(l.unit)} each</span></div>
+    <div class="sub">${yours ? "<b>Your notice</b>" : who(l.seller)} · ${when} · ${compare}</div></div><div class="buy">${right}</div>${extra}</div>`;
 }
 
 function renderNotices() {
@@ -1320,7 +1483,8 @@ function renderNotices() {
   const mineNow = all.filter((l) => mine(l.seller));
   const maxMine = rules.board?.max_per_seller ?? 3;
   $("n-coins").textContent = `you have ${coins} coins`;
-  $("ntab-buy").textContent = `For sale${others.length ? ` (${others.length})` : ""}`;
+  const waiting = bidsNow().offers.filter((o) => mineNow.some((l) => l.id === o.on) && !o.counter).length;
+  $("ntab-buy").textContent = `For sale${others.length ? ` (${others.length})` : ""}${waiting ? ` · ${waiting} ${waiting === 1 ? "offer" : "offers"} for you` : ""}`;
   $("ntab-buy").classList.toggle("on", ntab === "buy");
   $("ntab-pin").classList.toggle("on", ntab === "pin");
   $("notice-list").hidden = ntab !== "buy";
@@ -1328,8 +1492,10 @@ function renderNotices() {
 
   let html = "";
   if (ntab === "buy") {
-    html = others.map(noticeRow).join("");
-    if (!others.length) html = mineNow.length ? `<p class="empty">No one else is selling anything right now.</p>` : `<p class="empty">No one is selling anything right now. Pin the first notice: a spare tool, or goods at your own price.</p>`;
+    const orders = bidsNow().orders.filter((o) => o.expiresMs > Date.now());
+    if (orders.length) html += `<h4>Maren wants</h4>` + orders.map(orderRow).join("") + (others.length ? `<h4>For sale</h4>` : "");
+    html += others.map(noticeRow).join("");
+    if (!others.length) html += mineNow.length ? `<p class="empty">No one else is selling anything right now.</p>` : `<p class="empty">No one is selling anything right now. Pin the first notice: a spare tool, or goods at your own price.</p>`;
     if (mineNow.length) html += `<h4>Your notices</h4>` + mineNow.map(noticeRow).join("");
   } else {
     const bag = SLOTS.filter((t) => pv.items[idx(t)] > 0);
@@ -1447,6 +1613,61 @@ async function takeDown(id) {
   toast(`Took the notice down. ${lot(l.token, l.qty)} back in your bag.`);
   S.market.notices.listings = S.market.notices.listings.filter((x) => x.id !== id);
   renderNotices();
+}
+
+async function fillOrder(id, qty) {
+  const o = bidsNow().orders.find((x) => x.id === id);
+  if (!o) return;
+  const res = await bidTx("Handing it over", "fill_order", { id, qty }, 0n, `Filled Maren's order: ${lot(o.token, qty)}`);
+  if (!res) return;
+  const got = qty * o.unit;
+  coins += Math.floor(got);
+  pv.items[idx(o.token)] -= qty;
+  sfx.coin();
+  toast(`Maren takes ${yourLot(o.token, qty)} for ${fmt(got)} coins, ${fmt(o.unit - marenBid(o.token))} more each than her usual bid.`, false, 6000);
+  float(`+${fmt(got)}`, "coin");
+  renderHud();
+}
+
+async function makeOffer(id) {
+  const l = S.board.find((x) => x.id === id);
+  if (!l || !offerEdit) return;
+  const { qty, price } = offerEdit;
+  const res = await bidTx("Writing an offer", "make_offer", { listing_id: id, qty, unit_price: coinsToYocto(price).toString() }, coinsToYocto(price * qty), `Offered ${price} each for ${lot(l.token, qty)}`);
+  if (!res) return;
+  coins = Math.max(0, coins - price * qty);
+  toast(`Offer pinned under ${noticeOf(l.seller)}: ${price} each for ${yourLot(l.token, qty)}. Your ${price * qty} coins are held until ${who(l.seller)} answers.`, false, 7000);
+  renderHud();
+}
+
+async function takeCounter(id) {
+  const o = bidsNow().offers.find((x) => x.id === id);
+  if (!o?.counter) return;
+  const more = Math.ceil((o.counter - o.unit) * o.qty * 1000) / 1000;
+  const extra = (BigInt(o.counterYocto) - BigInt(o.unitYocto)) * BigInt(o.qty);
+  const res = await bidTx("Paying the difference", "accept_counter", { id }, extra, `Took a counter-offer: ${lot(o.token, o.qty)}`);
+  if (!res) return;
+  coins = Math.max(0, Math.floor(coins - more));
+  sfx.coin();
+  toast(`Done: ${yourLot(o.token, o.qty)} for ${fmt(o.counter * o.qty)} coins.`);
+  float(`+${yourLot(o.token, o.qty)}`, o.token);
+  renderHud();
+}
+
+async function answerOffer(id, answer, counter) {
+  const o = bidsNow().offers.find((x) => x.id === id);
+  if (!o) return;
+  const args = { id, answer, counter: counter ? coinsToYocto(counter).toString() : null };
+  const label = { accept: `Accepted an offer: ${lot(o.token, o.qty)} for ${fmt(o.unit * o.qty)}`, decline: "Declined an offer", counter: `Countered at ${counter} each` }[answer];
+  const res = await bidTx(answer === "accept" ? "Shaking on it" : "Writing back", "answer_offer", args, 0n, label);
+  if (!res) return;
+  if (answer === "accept") {
+    coins += Math.floor(o.unit * o.qty);
+    sfx.coin();
+    float(`+${fmt(o.unit * o.qty)}`, "coin");
+    toast(`Sold ${yourLot(o.token, o.qty)} to ${who(o.bidder)} for ${fmt(o.unit * o.qty)} coins.`);
+  } else toast(answer === "decline" ? `Turned it down. ${who(o.bidder)} gets their coins back.` : `Countered at ${counter} each. It's up to ${who(o.bidder)} now.`);
+  renderHud();
 }
 
 /// When something of yours sells off the board while you are elsewhere, say so.
@@ -1588,7 +1809,32 @@ $("notices").addEventListener("click", (e) => {
     buyQty[d.bq] = Math.max(1, Math.min(l.qty, (buyQty[d.bq] ?? l.qty) + Number(d.d)));
   } else if (d.buy) return buyNotice(Number(d.buy), Number(d.qty));
   else if (d.cancel) return takeDown(Number(d.cancel));
+  else if (d.fill) return fillOrder(Number(d.fill), Number(d.qty));
+  else if (d.offer) {
+    const l = S.board.find((x) => x.id === Number(d.offer));
+    offerEdit = offerEdit?.id === l.id ? null : { id: l.id, qty: l.qty, price: Math.max(1, Math.min(l.unit - 1, Math.round(l.unit * 0.8))) };
+  } else if (d.oq) {
+    const l = S.board.find((x) => x.id === offerEdit?.id);
+    if (l) offerEdit.qty = Math.max(1, Math.min(l.qty, offerEdit.qty + Number(d.oq)));
+  } else if (d.op) {
+    const l = S.board.find((x) => x.id === offerEdit?.id);
+    if (l) offerEdit.price = Math.max(1, Math.min(Math.ceil(l.unit) - 1, offerEdit.price + Number(d.op)));
+  } else if (d.offerGo) return makeOffer(Number(d.offerGo));
+  else if (d.withdraw) return bidTx("Taking the offer back", "withdraw_offer", { id: Number(d.withdraw) }, 0n, "Withdrew an offer").then((r) => r && toast("Offer withdrawn: the coins are on their way back to you."));
+  else if (d.takeCounter) return takeCounter(Number(d.takeCounter));
+  else if (d.accept) return answerOffer(Number(d.accept), "accept");
+  else if (d.decline) return answerOffer(Number(d.decline), "decline");
+  else if (d.counter) {
+    const o = bidsNow().offers.find((x) => x.id === Number(d.counter));
+    const l = S.board.find((x) => x.id === o.on);
+    counterEdit = { id: o.id, price: Math.max(Math.floor(o.unit) + 1, Math.round((o.unit + l.unit) / 2)) };
+  } else if (d.cp) {
+    const o = bidsNow().offers.find((x) => x.id === counterEdit?.id);
+    const l = o && S.board.find((x) => x.id === o.on);
+    if (l) counterEdit.price = Math.max(Math.floor(o.unit) + 1, Math.min(Math.ceil(l.unit) - 1, counterEdit.price + Number(d.cp)));
+  } else if (d.counterGo) return answerOffer(Number(d.counterGo), "counter", counterEdit.price);
   else return;
+  lastNotices = "";
   renderNotices();
 });
 $("notices").addEventListener("input", (e) => {
@@ -1616,7 +1862,12 @@ $("tab-books").onclick = () => {
 $("list").addEventListener("click", (e) => {
   const b = e.target.closest("button");
   if (!b) return;
-  if (b.dataset.qtyToken) {
+  if (b.dataset.bidStep) {
+    bidAmt = Math.max(minBid(S.market.auction), bidAmt + Number(b.dataset.bidStep));
+    renderShop();
+  } else if (b.dataset.bidGo) {
+    bidAuction();
+  } else if (b.dataset.qtyToken) {
     const t = b.dataset.qtyToken;
     const have = pv.items[idx(t)];
     sellQty[t] = Math.max(1, Math.min(have, (sellQty[t] ?? have) + Number(b.dataset.d)));

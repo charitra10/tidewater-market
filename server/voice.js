@@ -129,6 +129,10 @@ const LINES = {
     () => "The stall's shut, love. My purse is empty, and the ledger won't let me trade until someone puts money in. Look at my books if you want to help.",
     () => "Shutters are down. No coin, no trade: that's the rule. An investor could open me up again.",
   ],
+  at_auction: [
+    (c) => `My last lens is up for auction, love: ${c.top ? `${c.top} coins is the bid to beat` : `nobody's bid yet, and ${c.reserve} starts it`}. Bid on it in the stall, it closes in ${c.endsIn}.`,
+    (c) => `That one's going to the highest bidder. ${c.top ? `It's at ${c.top} now` : `${c.reserve} opens the bidding`}; you've ${c.endsIn} left.`,
+  ],
   red_tide: [
     () => "Kelp? In a red tide? It's turned, love, every strand of it. Come back when the water's clear.",
     () => "Not a strand of kelp while the red tide's in. Nobody will touch it, not even the mainland.",

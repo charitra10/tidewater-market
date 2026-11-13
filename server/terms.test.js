@@ -25,6 +25,14 @@ test("the terms the game shows are the contract's", () => {
   assert.equal(TERMS.loanWithholdPct, constant("LOAN_WITHHOLD_PCT"));
   assert.equal(TERMS.coverPremium, constant("COVER_PREMIUM"));
   assert.equal(TERMS.coverPayout, constant("COVER_PAYOUT"));
+  assert.equal(TERMS.maxOffersPerPlayer, constant("MAX_OFFERS_PER_PLAYER"));
+  assert.equal(TERMS.offerTtlMs, constant("OFFER_TTL_MS"));
+  assert.equal(TERMS.maxOrders, constant("MAX_ORDERS"));
+  assert.equal(TERMS.orderMaxMs, constant("ORDER_MAX_MS"));
+  assert.equal(TERMS.bidStepPct, constant("BID_STEP_PCT"));
+  assert.equal(TERMS.auctionExtendMs, constant("AUCTION_EXTEND_MS"));
+  assert.equal(TERMS.auctionMinMs, constant("AUCTION_MIN_MS"));
+  assert.equal(TERMS.auctionMaxMs, constant("AUCTION_MAX_MS"));
 });
 
 test("your name in the village sets her mood, in words and in a haggle", () => {
