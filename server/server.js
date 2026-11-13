@@ -16,7 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
-import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan } from "./merchant.js";
+import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices } from "./merchant.js";
 import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
 import { tideAt, tideBidFactor, stormAt, stormBidFactor } from "../web/tide.js";
 
@@ -244,13 +244,38 @@ function addNews(text) {
 // ---------- the workshop: craft what is missing, ship what piles up ----------
 let lastActivity = 0;
 let working = false;
+/// Run one chain call for the workshop; a refusal is logged, not fatal to the round.
+async function tryCall(what, promise) {
+  try {
+    return await promise;
+  } catch (e) {
+    console.warn(`  · ${what}: ${e.message}`);
+    return null;
+  }
+}
+const minus = (stock, promised) => Object.fromEntries(Object.entries(stock).map(([t, n]) => [t, n - (promised[t] ?? 0)]));
+
 async function workshopTick() {
   if (working || Date.now() - lastActivity > 10 * 60_000) return;
   working = true;
   try {
-    const market = await getMarket(true);
+    let market = await getMarket(true);
     if (market.frozen) return;
-    const jobs = planWork(market, market.exportPrice).slice(0, 3);
+    const silasIn = dealerHere(market);
+    // notices nobody took come down, so the goods can be exported or shipped after all
+    for (const l of staleNotices(logs.listings, MERCHANT_ID, Date.now())) await tryCall("take down", merchantCall("cancel_listing", { id: l.id }));
+    if (silasIn) for (const l of staleNotices(logs.listings, DEALER_ID, Date.now())) await tryCall("take down", dealerCall("cancel_listing", { id: l.id }));
+    // Maren offers surplus ore and pearls to Silas when he pays more than the mainland
+    if (silasIn) {
+      for (const n of marenNotices(market, promisedBy(logs.listings, MERCHANT_ID, Date.now()))) {
+        const r = await tryCall("pin", merchantCall("shop_list_item", { token_id: n.token, qty: n.qty, unit_price: coinsToYoctoStr(n.unit) }));
+        if (r?.value.status === "listed") addNews(`Maren pinned ${lot(n.token, n.qty)} on the notice board at ${n.unit} each: Silas pays more than the mainland.`);
+      }
+    }
+    if (cache.at === 0) market = await getMarket(true);
+    // craft what is missing and export the rest of the surplus (promised goods stay)
+    const free = minus(market.stock, promisedBy(logs.listings, MERCHANT_ID, Date.now()));
+    const jobs = planWork({ ...market, stock: free }, market.exportPrice).slice(0, 3);
     for (const job of jobs) {
       if (job.op === "craft") {
         await merchantCall("craft", { token_id: job.token, times: job.qty });
@@ -263,17 +288,32 @@ async function workshopTick() {
         addNews(`The mainland boat took ${lot(job.token, job.qty)} for ${pay} coins.`);
       }
     }
-    await boardTick(jobs.length ? await getMarket(true) : market);
-    if (dealerHere(market)) {
-      for (const job of shipPlan(market.dealer, market.mainland)) {
-        await dealerCall("ship", { token_id: job.token, qty: job.qty });
-        addNews(`Silas shipped ${lot(job.token, job.qty)} to the city for ${Math.round(job.pay)} coins.`);
-      }
-    }
+    if (cache.at === 0) market = await getMarket(true);
+    await boardTick(market); // Maren buys off the board (Silas's pearls included)
+    if (silasIn) await dealerTick(cache.at === 0 ? await getMarket(true) : market);
   } catch (e) {
     console.warn("workshop:", e.message);
   } finally {
     working = false;
+  }
+}
+
+/// Silas between customers: pins pearls for Maren when she pays more than the
+/// city, buys cheap ore and pearls off the board, and ships a full hold.
+async function dealerTick(market) {
+  for (const n of silasNotices(market, promisedBy(logs.listings, DEALER_ID, Date.now()))) {
+    const r = await tryCall("pin", dealerCall("dealer_list_item", { token_id: n.token, qty: n.qty, unit_price: coinsToYoctoStr(n.unit) }));
+    if (r?.value.status === "listed") addNews(`Silas pinned ${lot(n.token, n.qty)} on the notice board at ${n.unit} each: Maren pays more than the city.`);
+  }
+  for (const pick of dealerPicks(market.dealer, logs.listings, Date.now(), DEALER_ID).slice(0, 3)) {
+    const r = await tryCall("board", dealerCall("dealer_buy_listing", { id: pick.id, qty: pick.qty }));
+    if (r?.value.status === "bought") addNews(`Silas bought ${lot(pick.token, pick.qty)} off ${whoName(pick.seller)}'s notice for ${Math.round(pick.total)} coins.`);
+    else if (r) console.log(`  · the ledger refused Silas's board buy: ${r.value.reason}`);
+  }
+  if (cache.at === 0) market = await getMarket(true);
+  for (const job of shipPlan(market.dealer, market.mainland, promisedBy(logs.listings, DEALER_ID, Date.now()))) {
+    const r = await tryCall("ship", dealerCall("ship", { token_id: job.token, qty: job.qty }));
+    if (r) addNews(`Silas shipped ${lot(job.token, job.qty)} to the city for ${Math.round(job.pay)} coins.`);
   }
 }
 setInterval(workshopTick, 10_000);
@@ -281,7 +321,7 @@ setInterval(workshopTick, 10_000);
 /// Between customers Maren reads the notice board, and buys what is cheap
 /// enough (merchant.js decides; the contract's guard rails still apply).
 async function boardTick(market) {
-  const picks = boardPicks(market, logs.listings, Date.now()).slice(0, 3);
+  const picks = boardPicks(market, logs.listings, Date.now(), MERCHANT_ID).slice(0, 3);
   for (const pick of picks) {
     try {
       const res = await merchantCall("shop_buy_listing", { id: pick.id, qty: pick.qty });
@@ -295,6 +335,8 @@ async function boardTick(market) {
 
 /// "Guest 7f1f" for a guest account, the first part of the name otherwise.
 function whoName(account) {
+  if (account === MERCHANT_ID) return "Maren";
+  if (account === DEALER_ID) return "Silas";
   const g = account.match(/^g([0-9a-f]{4})[0-9a-f]*\./);
   return g ? `Guest ${g[1]}` : account.split(".")[0];
 }
@@ -523,7 +565,7 @@ async function route(req, res) {
   };
   try {
     if (url.pathname === "/api/config") {
-      return send(200, { network: "testnet", contract: CONTRACT, merchantId: MERCHANT_ID, rpcUrls: RPC_URLS, guestNear: GUEST_NEAR, explorer: "https://testnet.nearblocks.io", voice });
+      return send(200, { network: "testnet", contract: CONTRACT, merchantId: MERCHANT_ID, dealerId: DEALER_ID, rpcUrls: RPC_URLS, guestNear: GUEST_NEAR, explorer: "https://testnet.nearblocks.io", voice });
     }
     if (url.pathname === "/api/market") {
       const market = await getMarket(url.searchParams.has("fresh")); // "fresh": right after the player changed something
@@ -589,7 +631,7 @@ async function route(req, res) {
 http.createServer(route).listen(PORT, () => {
   console.log(`Tidewater Market is open: http://localhost:${PORT}`);
   console.log(`  contract  ${CONTRACT}`);
-  console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft, export and buy off the notice board)`);
-  if (DEALER_ID) console.log(`  dealer    ${DEALER_ID}  (Silas: his key can only quote, cancel quotes and ship)`);
+  console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft, export and trade on the notice board)`);
+  if (DEALER_ID) console.log(`  dealer    ${DEALER_ID}  (Silas: his key can only quote, ship and trade on the notice board)`);
   console.log(`  voice     ${voice === "claude" ? "Claude writes Maren's lines" : "written lines (set ANTHROPIC_API_KEY for Claude)"}`);
 });

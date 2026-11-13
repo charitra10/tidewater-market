@@ -2,7 +2,7 @@
 // with Maren. No network. Run: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dealerBid, dealerBoard, openDealerHaggle, shipPlan, haggle, unitBid, DEALER_HOLD, DEALER_TOKENS, TARGET } from "./merchant.js";
+import { dealerBid, dealerBoard, openDealerHaggle, shipPlan, haggle, unitBid, boardPicks, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, MERCHANT_NOTICE_MS, DEALER_HOLD, DEALER_TOKENS, TARGET } from "./merchant.js";
 import { writtenLine } from "./voice.js";
 
 const zero = { kelp: 0, driftwood: 0, ore: 0, pearl: 0, rope: 0, pickaxe: 0, boat: 0, beacon: 0 };
@@ -91,6 +91,9 @@ test("he ships a full hold to the city, never in a storm, never past the mainlan
     { token: "pearl", qty: 3, pay: 246 },
   ]);
   assert.deepEqual(shipPlan(silas({ stock: { ore: 2, pearl: 3 } }), 1000).map((j) => j.token), ["pearl"]);
+  // his boat sails at every high tide with whatever is in the hold
+  assert.deepEqual(shipPlan(silas({ stock: { ore: 1 }, tide: { phase: "high", spring: false } }), 1000), [{ token: "ore", qty: 1, pay: 30 }]);
+  assert.deepEqual(shipPlan(silas({ stock: { ore: 1 }, tide: { phase: "low", spring: false } }), 1000), []);
   assert.deepEqual(shipPlan({ ...full, storm: { active: true } }, 1000), []);
   assert.deepEqual(shipPlan(full, 200).map((j) => j.token), ["ore"]);
 });
@@ -106,4 +109,73 @@ test("Silas has his own voice, and names his price", () => {
   assert.match(writtenLine("wont_buy", {}, () => 0, "silas"), /ore and pearls/);
   assert.match(writtenLine("storm", { passesIn: "3 minutes" }, () => 0, "silas"), /storm passes, about 3 minutes/);
   assert.match(writtenLine("trick", { reason: "above price ceiling" }, () => 0, "silas"), /above price ceiling/);
+});
+
+// ---------------- Maren and Silas trading with each other on the board ----------------
+
+const NOW = 1_000_000_000;
+const EXPORT = { ...zero, kelp: 2.8, driftwood: 4.2, ore: 21, pearl: 56 };
+/// Maren's books with Silas in town, as the server sees them.
+const town = (over = {}, dealer = {}) => ({ ...maren(over), exportPrice: EXPORT, dealer: silas(dealer), storm: over.storm });
+const notice = (seller, token, qty, unit, agoMs = 60_000) => ({ id: 7, seller, token, qty, unit, listedMs: NOW - agoMs, expiresMs: NOW + 86_400_000 });
+
+test("Maren pins her surplus ore for Silas, priced so he takes the whole lot", () => {
+  const m = town({ stock: { ore: 10 } });
+  const [n] = marenNotices(m);
+  assert.equal(n.token, "ore");
+  assert.ok(n.qty >= 1 && n.qty <= 4);
+  assert.ok(n.unit > EXPORT.ore, `${n.unit} beats the mainland's ${EXPORT.ore}`);
+  const picks = dealerPicks(m.dealer, [notice("maren", n.token, n.qty, n.unit)], NOW, "silas");
+  assert.deepEqual(picks.map((p) => [p.token, p.qty]), [["ore", n.qty]]);
+  // with a bigger surplus and an emptier, richer Silas she offers more at once
+  const flush = town({ stock: { ore: 12 } }, { treasury: 900 });
+  flush.dealer.cityPrice.ore = 40;
+  assert.ok(marenNotices(flush)[0].qty > n.qty);
+});
+
+test("she keeps her ore for the mainland when he would pay less, when he is closed, or when she has no surplus", () => {
+  assert.deepEqual(marenNotices(town({ stock: { ore: 10 } }, { stock: { ore: 4 } })), [], "his hold is full: he pays under the export price");
+  assert.deepEqual(marenNotices(town({ stock: { ore: 10 }, storm: { active: true } }, { storm: { active: true } })), []);
+  assert.deepEqual(marenNotices(town({ stock: { ore: 6 } })), [], "no surplus over her target");
+  assert.deepEqual(marenNotices(town({ stock: { ore: 10 } }), { ore: 4 }), [], "one notice per good at a time");
+  assert.deepEqual(marenNotices({ ...town({ stock: { ore: 10 } }), dealer: null }), []);
+});
+
+test("Silas pins his pearls when Maren would pay more than the city, and she buys them", () => {
+  const m = town({ stock: { pearl: 0, beacon: 0 } }, { stock: { pearl: 3 } });
+  m.dealer.avgCost = { ...zero, pearl: 60 };
+  const [n] = silasNotices(m);
+  assert.equal(n.token, "pearl");
+  assert.ok(n.unit > m.dealer.cityPrice.pearl && n.qty >= 1, JSON.stringify(n));
+  const picks = boardPicks(m, [notice("silas", "pearl", n.qty, n.unit)], NOW, "maren");
+  assert.equal(picks[0]?.qty, n.qty, "she takes every one he pinned");
+});
+
+test("he ships instead when she pays less than the city, and never sells under cost", () => {
+  const normal = town({}, { stock: { pearl: 3 } });
+  normal.dealer.avgCost = { ...zero, pearl: 60 };
+  assert.deepEqual(silasNotices(normal), []);
+  const dear = town({ stock: { pearl: 0, beacon: 0 } }, { stock: { pearl: 3 } });
+  dear.dealer.avgCost = { ...zero, pearl: 95 };
+  assert.deepEqual(silasNotices(dear), []);
+});
+
+test("Silas buys cheap ore and pearls off the board: players first, never his own, within his ceiling", () => {
+  const d = silas();
+  assert.equal(dealerPicks(d, [notice("guest", "ore", 2, 20)], NOW, "silas")[0]?.qty, 2);
+  assert.deepEqual(dealerPicks(d, [notice("guest", "ore", 2, 20, 5_000)], NOW, "silas"), [], "players get first pick");
+  assert.deepEqual(dealerPicks(d, [notice("silas", "ore", 2, 20)], NOW, "silas"), [], "not his own");
+  assert.deepEqual(dealerPicks(d, [notice("guest", "ore", 2, 45)], NOW, "silas"), [], "over his ceiling");
+  assert.deepEqual(dealerPicks(d, [notice("guest", "kelp", 2, 1)], NOW, "silas"), [], "he does not deal in kelp");
+  assert.deepEqual(dealerPicks(silas({ storm: { active: true } }), [notice("guest", "ore", 2, 20)], NOW, "silas"), []);
+  assert.deepEqual(dealerPicks(silas({ treasury: 30 }), [notice("guest", "ore", 3, 20)], NOW, "silas"), [], "a thin purse makes him stingy");
+  assert.deepEqual(dealerPicks(silas({ boughtInWindow: 590 }), [notice("guest", "ore", 3, 20)], NOW, "silas"), [], "within his spending cap");
+});
+
+test("promised goods stay: he does not ship them, and old notices come down", () => {
+  assert.deepEqual(shipPlan(silas({ stock: { pearl: 3 } }), 1000, { pearl: 3 }), []);
+  assert.deepEqual(shipPlan(silas({ stock: { pearl: 5 } }), 1000, { pearl: 2 }).map((j) => j.qty), [3]);
+  const listings = [notice("maren", "ore", 4, 22, 1000), notice("maren", "pearl", 1, 90, MERCHANT_NOTICE_MS + 1), notice("guest", "ore", 1, 9)];
+  assert.deepEqual(promisedBy(listings, "maren", NOW), { ore: 4, pearl: 1 });
+  assert.deepEqual(staleNotices(listings, "maren", NOW).map((l) => l.token), ["pearl"]);
 });

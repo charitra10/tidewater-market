@@ -131,13 +131,13 @@ export function usedToolPrice(market, token, stock = market.stock[token]) {
 /// `listings`: [{ id, seller, token, qty, unit (coins), listedMs, expiresMs }].
 /// `market` may carry `boughtInWindow` and `windowLimit` (coins) for her spending cap.
 /// Returns [{ id, seller, token, qty, total }], cheapest notices first.
-export function boardPicks(market, listings, now) {
+export function boardPicks(market, listings, now, self = null) {
   const stock = { ...market.stock };
   let treasury = market.treasury;
   let spent = market.boughtInWindow ?? 0;
   const limit = market.windowLimit ?? Infinity;
   const picks = [];
-  const open = listings.filter((l) => now <= l.expiresMs).sort((a, b) => a.unit - b.unit || a.listedMs - b.listedMs);
+  const open = listings.filter((l) => now <= l.expiresMs && l.seller !== self).sort((a, b) => a.unit - b.unit || a.listedMs - b.listedMs);
   for (const l of open) {
     const raw = RAW.includes(l.token);
     if (!raw && !WARES.includes(l.token)) continue;
@@ -356,19 +356,112 @@ export function openDealerHaggle(dealer, { token, qty, trades = 0, mood = 0 }, r
   return { side: "buy", token, qty, list: counter, counter, limit, round: 0, patience: 3 + (mood > 0 ? 1 : 0), mood, bluffUsed: false, charmUsed: false, final: false, over: false };
 }
 
-/// What he should ship to the city now: a full hold of each, if the mainland
-/// can pay and the sea lets him sail. Returns [{ token, qty, pay }].
-export function shipPlan(dealer, mainland) {
+/// What he should ship to the city now: a full hold of each, and at high tide
+/// (when his boat sails anyway) whatever he has, if the mainland can pay and
+/// the sea lets him sail. Goods promised on the board stay. Returns [{ token, qty, pay }].
+export function shipPlan(dealer, mainland, promised = {}) {
   if (dealer.storm?.active) return [];
   const jobs = [];
   let fund = mainland;
   for (const token of DEALER_TOKENS) {
-    const qty = dealer.stock[token];
+    const qty = dealer.stock[token] - (promised[token] ?? 0);
     const pay = qty * (dealer.cityPrice[token] ?? 0);
-    if (qty >= DEALER_HOLD[token] && pay > 0 && pay <= fund) {
+    const sailing = qty >= DEALER_HOLD[token] || (qty > 0 && dealer.tide?.phase === "high");
+    if (sailing && pay > 0 && pay <= fund) {
       jobs.push({ token, qty, pay });
       fund -= pay;
     }
   }
   return jobs;
+}
+
+// ---------------------------------------------------------------------------
+// Maren and Silas trade with each other, in the open, on the notice board
+// ---------------------------------------------------------------------------
+
+/// A merchant's notice nobody takes within this long comes down again, so the
+/// promised goods can still be exported, shipped or sold.
+export const MERCHANT_NOTICE_MS = 10 * 60_000;
+
+/// What a merchant has promised on the board, per token.
+export function promisedBy(listings, seller, now) {
+  const out = {};
+  for (const l of listings) if (l.seller === seller && now <= l.expiresMs) out[l.token] = (out[l.token] ?? 0) + l.qty;
+  return out;
+}
+
+/// A merchant's own notices that have waited too long.
+export function staleNotices(listings, seller, now) {
+  return listings.filter((l) => l.seller === seller && now - l.listedMs > MERCHANT_NOTICE_MS);
+}
+
+/// Surplus ore and pearls Maren pins on the board because Silas pays more than
+/// the mainland would (and more than they cost her). Priced at what he would
+/// still pay for the last unit, so he takes the lot. Returns [{ token, qty, unit }].
+export function marenNotices(market, promised = {}) {
+  const d = market.dealer;
+  if (!d || market.storm?.active) return []; // in a storm he buys nothing
+  const out = [];
+  for (const token of DEALER_TOKENS) {
+    if (promised[token]) continue; // one notice per good at a time
+    const surplus = market.stock[token] - Math.ceil(TARGET[token] * 1.5);
+    const exportAt = market.exportPrice?.[token] ?? 0;
+    const atLeast = Math.max(exportAt + 1, market.floor[token] ?? 0, market.avgCost[token] ?? 0);
+    for (let qty = Math.min(surplus, 4); qty > 0; qty--) {
+      const unit = Math.floor(dealerBid(d, token, d.stock[token] + qty - 1));
+      if (unit >= atLeast) {
+        out.push({ token, qty, unit });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/// Pearls (or ore) Silas pins for Maren when she would pay more than the city
+/// does, never under what they cost him. Returns [{ token, qty, unit }].
+export function silasNotices(market, promised = {}) {
+  const d = market.dealer;
+  if (!d) return [];
+  const out = [];
+  for (const token of DEALER_TOKENS) {
+    const free = d.stock[token] - (promised[token] ?? 0);
+    if (promised[token] || free <= 0) continue;
+    const unit = Math.floor(unitBid(market, token));
+    if (unit <= d.cityPrice[token] || unit < Math.ceil(d.avgCost?.[token] ?? 0)) continue;
+    let qty = 0; // as many as she would still pay that much for
+    while (qty < free && unitBid(market, token, market.stock[token] + qty) >= unit) qty++;
+    if (qty > 0) out.push({ token, qty, unit });
+  }
+  return out;
+}
+
+/// Which notices Silas buys off the board: anyone's ore and pearls (not his
+/// own) priced at or under his offer, after players have had first pick,
+/// within his ceiling, purse and spending cap. Returns [{ id, seller, token, qty, total }].
+export function dealerPicks(dealer, listings, now, self = null) {
+  if (dealer.storm?.active) return [];
+  const stock = { ...dealer.stock };
+  let treasury = dealer.treasury;
+  let spent = dealer.boughtInWindow ?? 0;
+  const limit = dealer.windowLimit ?? Infinity;
+  const picks = [];
+  const open = listings
+    .filter((l) => l.seller !== self && DEALER_TOKENS.includes(l.token) && now <= l.expiresMs && now - l.listedMs >= BOARD_GRACE_MS.raw)
+    .sort((a, b) => a.unit - b.unit || a.listedMs - b.listedMs);
+  for (const l of open) {
+    if (l.unit > (dealer.ceiling[l.token] ?? 0)) continue; // the contract would refuse it
+    let qty = 0;
+    for (; qty < l.qty; qty++) {
+      const fair = dealerBid({ ...dealer, treasury }, l.token, stock[l.token] + qty);
+      if (l.unit > fair || (qty + 1) * l.unit > treasury || spent + (qty + 1) * l.unit > limit) break;
+    }
+    if (qty === 0) continue;
+    const total = qty * l.unit;
+    picks.push({ id: l.id, seller: l.seller, token: l.token, qty, total });
+    stock[l.token] += qty;
+    treasury -= total;
+    spent += total;
+  }
+  return picks;
 }
