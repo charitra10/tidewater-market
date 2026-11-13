@@ -17,6 +17,7 @@ const BLOCKS = [
   { x1: 356, x2: 416, y1: 92, y2: 148 }, // the lighthouse
   { x1: 936, x2: 1014, y1: 486, y2: 508 }, // the notice board
   { x1: 494, x2: 528, y1: 288, y2: 306 }, // Silas's crates
+  { x1: 1160, x2: 1220, y1: 548, y2: 574 }, // the workbench
 ];
 
 export const HOTSPOTS = [
@@ -26,6 +27,7 @@ export const HOTSPOTS = [
   { id: "stall", x: 800, y: 432, r: 78, label: "Maren's stall", verb: "Talk to Maren", pillUp: 176 },
   { id: "lighthouse", x: 424, y: 170, r: 72, label: "The old lighthouse", verb: "Climb the lighthouse", pillUp: 44 },
   { id: "board", x: 975, y: 534, r: 62, label: "The notice board", verb: "Read the notice board", pillUp: 150 },
+  { id: "bench", x: 1190, y: 594, r: 50, label: "The workbench", verb: "Use the workbench", pillUp: 84 },
   // only while the dealer is in town (`S.dealer`)
   { id: "dealer", x: 504, y: 344, r: 50, label: "Silas, the dealer", verb: "Trade with Silas", pillUp: 124, needs: "dealer" },
 ];
@@ -287,6 +289,128 @@ const CLOUDS = [[80, 26, 1.2], [380, 8, 1], [640, 34, 1.3], [920, 12, 1.1], [118
 
 /// The sky closes in, cloud drifts over, rain, and now and then lightning.
 /// `level` is 0 (calm) .. 1 (the storm at full blow).
+// ---------- events (see eventAt in tide.js) ----------
+/// Colour the water (drawn before the land, so only the sea takes it).
+function tintSea(ctx, colour) {
+  ctx.fillStyle = colour;
+  ctx.fillRect(0, 0, W, H);
+}
+/// Fog: banks of white drifting in off the sea, thickest over the water.
+function drawFog(ctx, t) {
+  const g = ctx.createLinearGradient(0, 0, 700, 0);
+  g.addColorStop(0, "rgba(236,240,240,0.62)");
+  g.addColorStop(0.55, "rgba(236,240,240,0.38)");
+  g.addColorStop(1, "rgba(236,240,240,0.1)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 9; i++) {
+    const x = ((i * 173 + t * (8 + i)) % (W + 400)) - 200;
+    const y = 80 + ((i * 97) % 560);
+    ellipse(ctx, x, y, 170, 34, "rgba(245,247,247,0.22)");
+  }
+}
+/// A shipwreck: a broken hull on the shore, and cargo along the tideline.
+function drawWreck(ctx, t) {
+  const x = 470;
+  const y = 470;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-0.35);
+  ctx.fillStyle = "#5e4128";
+  ctx.beginPath();
+  ctx.moveTo(-46, -6);
+  ctx.quadraticCurveTo(-30, 18, 0, 18);
+  ctx.quadraticCurveTo(30, 18, 40, -2);
+  ctx.lineTo(28, -10);
+  ctx.lineTo(10, -2);
+  ctx.lineTo(-8, -12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "#3f2b1b";
+  ctx.lineWidth = 2;
+  for (const dx of [-24, -6, 12, 28]) {
+    ctx.beginPath();
+    ctx.moveTo(dx, -6);
+    ctx.lineTo(dx + 2, 14);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#6e5034"; // the broken mast
+  ctx.fillRect(-6, -40, 4, 32);
+  ctx.restore();
+  // crates and a coil of rope bobbing at the water's edge
+  const bob = Math.sin(t * 2) * 1.5;
+  ctx.fillStyle = "#a07444";
+  ctx.fillRect(500, 410 + bob, 14, 12);
+  ctx.fillRect(452, 512 - bob, 12, 11);
+  ctx.strokeStyle = "#c9a24f";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(520, 500 + bob, 6, 0, Math.PI * 2);
+  ctx.stroke();
+}
+/// The lantern festival: bunting over the stall, lanterns glowing after dark.
+function drawBunting(ctx, t, night) {
+  const colours = ["#d9534f", "#e3b24f", "#2f8f96", "#7a5aa6"];
+  const strings = [
+    [[726, 318], [874, 318]],
+    [[874, 318], [1030, 470]],
+  ];
+  for (const [[x1, y1], [x2, y2]] of strings) {
+    const n = 9;
+    const sag = 18;
+    const at = (k) => [x1 + (x2 - x1) * k, y1 + (y2 - y1) * k + Math.sin(Math.PI * k) * sag];
+    ctx.strokeStyle = "rgba(60,50,40,0.7)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let i = 0; i <= 20; i++) {
+      const [x, y] = at(i / 20);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+    for (let i = 1; i < n; i++) {
+      const [x, y] = at(i / n);
+      const sway = Math.sin(t * 2 + i) * 1.5;
+      ctx.fillStyle = colours[i % colours.length];
+      ctx.beginPath();
+      ctx.moveTo(x - 5, y);
+      ctx.lineTo(x + 5, y);
+      ctx.lineTo(x + sway, y + 11);
+      ctx.closePath();
+      ctx.fill();
+      if (night && i % 2 === 0) ellipse(ctx, x, y + 16, 5, 6, `rgba(255,${190 + (i % 3) * 20},90,${0.75 + 0.2 * Math.sin(t * 3 + i)})`);
+    }
+  }
+}
+/// The workbench by the cottage, where players make their own rope and pickaxes.
+function drawWorkbench(ctx, t) {
+  const x = 1190;
+  const y = 566;
+  ellipse(ctx, x, y + 4, 36, 6, "rgba(30,60,30,0.2)");
+  ctx.fillStyle = "#6e5034";
+  ctx.fillRect(x - 26, y - 18, 5, 22);
+  ctx.fillRect(x + 21, y - 18, 5, 22);
+  ctx.fillStyle = "#946a40";
+  ctx.fillRect(x - 30, y - 24, 60, 8);
+  ctx.fillStyle = "#7d5a39";
+  ctx.fillRect(x - 30, y - 17, 60, 2);
+  // a coil of rope and a saw on the top
+  ctx.strokeStyle = "#c9a24f";
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.ellipse(x - 12, y - 27, 7, 3.5, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = "#8d939b";
+  ctx.beginPath();
+  ctx.moveTo(x + 2, y - 26);
+  ctx.lineTo(x + 22, y - 28);
+  ctx.lineTo(x + 22, y - 24);
+  ctx.lineTo(x + 2, y - 24);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#6e5034";
+  ctx.fillRect(x - 2, y - 28, 5, 5);
+}
+
 function drawStorm(ctx, t, level) {
   if (level <= 0) return;
   ctx.fillStyle = `rgba(24,32,48,${0.36 * level})`;
@@ -1011,10 +1135,14 @@ export function drawWorld(ctx, t, S) {
   const lvl = S.tide?.height ?? 0; // -1 low water .. 1 high water (spring tides go further)
   const wx = -8 + 14 * lvl; // where the water's edge sits, from the shoreline
   const rough = S.storm?.level ?? 0;
+  const event = S.event?.active ? S.event.kind : null;
   drawSea(ctx, t, wx, rough);
+  if (event === "red_tide") tintSea(ctx, "rgba(176,48,40,0.32)");
+  if (event === "calm") tintSea(ctx, "rgba(255,255,255,0.12)");
   drawReef(ctx, t, lvl);
   drawLand(ctx, t, wx);
   drawWashedUp(ctx, lvl);
+  if (event === "shipwreck") drawWreck(ctx, t);
   drawCliffs(ctx, t);
   drawPier(ctx, t, S.hasBoat && !S.atSea);
   if (S.dealer) drawDealerBoat(ctx, t, S.storm?.active);
@@ -1041,6 +1169,7 @@ export function drawWorld(ctx, t, S) {
     { y: 404, draw: () => drawStall(ctx, t, S) },
     { y: 601, draw: () => drawCottage(ctx, t, S.night) },
     { y: 506, draw: () => drawNoticeBoard(ctx, t, S) },
+    { y: 566, draw: () => drawWorkbench(ctx, t) },
     ...(S.dealer ? [{ y: 314, draw: () => drawDealerPitch(ctx, t, S) }] : []),
     ...TREES.map(([x, y, s]) => ({ y, draw: () => drawTree(ctx, x, y, s, t) })),
   ];
@@ -1058,6 +1187,8 @@ export function drawWorld(ctx, t, S) {
     ellipse(ctx, bx - 4, by - 19, 11, 3.5, "#e6c36a");
   }
 
+  if (event === "festival") drawBunting(ctx, t, S.night);
+  if (event === "fog") drawFog(ctx, t);
   drawStorm(ctx, t, rough);
   if (rough < 0.4) drawGulls(ctx, t); // the gulls shelter from the storm
   drawNight(ctx, t, S.nightAmount);

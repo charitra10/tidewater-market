@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
 import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand } from "./merchant.js";
 import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
-import { tideAt, tideBidFactor, stormAt, stormBidFactor } from "../web/tide.js";
+import { tideAt, tideBidFactor, stormAt, stormBidFactor, eventAt } from "../web/tide.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.join(here, "..", "web");
@@ -158,7 +158,7 @@ function remember(market) {
   const board = priceBoard(market);
   const prices = {
     ...Object.fromEntries(board.sells.map((r) => [r.token, r.price])),
-    ...Object.fromEntries(RAW.map((t) => [t, Math.round(unitBid(market, t) * 10) / 10])),
+    ...Object.fromEntries(RAW.map((t) => [t, unitBid(market, t) > 0 ? Math.round(unitBid(market, t) * 10) / 10 : null])), // (null: not buying)
   };
   const silas = Object.fromEntries(DEALER_TOKENS.map((t) => [t, market.dealer ? Math.round(dealerBid(market.dealer, t) * 10) / 10 : null]));
   const last = history.at.length - 1;
@@ -186,6 +186,7 @@ async function getMarket(fresh = false) {
   if (cache.market && Date.now() - cache.at < (fresh ? 1000 : 3000)) {
     cache.market.tide = tideAt(Date.now()); // the tide turns (and storms blow) between chain reads
     cache.market.storm = stormAt(Date.now());
+    cache.market.event = eventAt(Date.now());
     cache.market.recent = tallyDemand(); // demand fades with time, not only with new trades
     if (cache.market.dealer) Object.assign(cache.market.dealer, { tide: cache.market.tide, storm: cache.market.storm });
     return cache.market;
@@ -211,6 +212,7 @@ async function getMarket(fresh = false) {
     windowLimit: yoctoToCoins(pol.buy_window_limit),
     tide: tideAt(Date.now()),
     storm: stormAt(Date.now()),
+    event: eventAt(Date.now()),
     recent: tallyDemand(),
     dealer: dv && {
       id: dv.account_id,
@@ -428,6 +430,7 @@ async function haggleApi(body) {
         if (market.stock[token] < qty) return reply(line("no_stock", { token }));
       } else {
         if (!RAW.includes(token)) return reply(line("wont_buy", { token }));
+        if (unitBid(market, token) <= 0) return reply(line("red_tide", { token }));
         if (pv.items[TOKENS.indexOf(token)] < qty) return reply(line("no_goods", { token }));
       }
       s = openHaggle(market, { side, token, qty, trades: pv.trades, mood: me.mood });
@@ -623,6 +626,7 @@ async function route(req, res) {
           : null,
         tide: market.tide,
         storm: market.storm,
+        event: market.event,
         now: Date.now(), // so the browser's tide clock agrees with hers
       });
     }

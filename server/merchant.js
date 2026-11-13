@@ -6,7 +6,7 @@
 //
 // All prices here are whole "coins" (1 coin = 0.001 NEAR).
 
-import { tideBidFactor, stormBidFactor } from "../web/tide.js";
+import { tideBidFactor, stormBidFactor, eventBidFactor, eventAskFactor, EVENT_TEXT } from "../web/tide.js";
 
 export const TOKENS = ["kelp", "driftwood", "ore", "pearl", "rope", "pickaxe", "boat", "beacon"];
 export const RAW = ["kelp", "driftwood", "ore", "pearl"]; // she buys these
@@ -29,7 +29,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /// `market`: { stock: {token: n}, avgCost: {token: coins}, treasury: coins,
 ///             floor: {token: coins}, ceiling: {token: coins},
-///             tide?: { phase, spring }, storm?: { active } (see web/tide.js) }
+///             tide?: { phase, spring }, storm?: { active }, event?: { kind, active } (see web/tide.js) }
 
 // ---------------------------------------------------------------------------
 // Recent demand: what players have been buying from her and selling to her
@@ -117,7 +117,9 @@ export function askWhy(market, token, stock = market.stock[token]) {
     { key: "purse", factor: wantsCash, note: short ? `Her purse is under ${COMFORTABLE * 0.5}, so she'll take a little less to raise cash` : "Her purse is healthy" },
     { key: "demand", factor: demand, note: bought ? `Players bought ${bought} in the last ${minutes(DEMAND_WINDOW_MS)} minutes: in demand` : "Nobody has bought one lately" },
   ];
-  const base = VALUE[token] * scarcity * wantsCash * demand;
+  const festive = eventAskFactor(token, market.event);
+  if (festive !== 1) steps.push({ key: "event", factor: festive, note: EVENT_TEXT[market.event.kind].why[token] });
+  const base = VALUE[token] * scarcity * wantsCash * demand * festive;
   const costFloor = (market.avgCost[token] ?? 0) * 1.15;
   const floor = market.floor[token] ?? 0;
   // never below what it cost her plus a margin, never below the on-chain floor
@@ -166,10 +168,15 @@ export function bidWhy(market, token, stock = market.stock[token]) {
   if (storm !== 1) {
     steps.push({ key: "storm", factor: storm, note: storm > 1 ? "Storm: the reef is shut, so nobody can fetch pearls" : "Storm: the shore is covered in wrack" });
   }
+  const happening = eventBidFactor(token, market.event);
+  if (happening !== 1) {
+    const why = EVENT_TEXT[market.event.kind].why;
+    steps.push({ key: "event", factor: happening, note: typeof why === "string" ? why : why[token] });
+  }
   const demand = demandFactor(market, "bid", token);
   const sold = market.recent?.[token]?.soldN ?? 0;
   steps.push({ key: "demand", factor: demand, note: sold ? `Players sold her ${sold} in the last ${minutes(DEMAND_WINDOW_MS)} minutes` : "Nobody has sold her any lately" });
-  const base = VALUE[token] * 0.62 * need * cash * (tide * storm) * demand;
+  const base = VALUE[token] * 0.62 * need * cash * (tide * storm) * demand * happening;
   const ceiling = market.ceiling[token] ?? Infinity;
   const price = Math.min(base, ceiling);
   const limits = [{ key: "ceiling", value: ceiling, binds: base > ceiling, note: `The ledger won't let her pay more than ${n1(ceiling)}` }];
@@ -200,7 +207,8 @@ export function priceBoard(market) {
     }),
     buys: RAW.map((token) => {
       const why = bidWhy(market, token);
-      return { token, stock: market.stock[token], price: Math.max(1, Math.round(why.price)), why };
+      // a price of 0 means she won't buy it at all (a red tide's kelp)
+      return { token, stock: market.stock[token], price: why.price > 0 ? Math.max(1, Math.round(why.price)) : null, why };
     }),
   };
 }
@@ -229,6 +237,7 @@ export function planWork(market, exportPrice = {}) {
     // ... but never at a loss: goods she overpaid for stay on the shelf (and push
     // her bids down) until cheaper stock brings her average cost under the export price
     const pays = (exportPrice[token] ?? 0) >= (market.avgCost[token] ?? 0);
+    if (eventBidFactor(token, market.event) === 0) continue; // the mainland won't take it either
     if (surplus > 0 && (exportPrice[token] ?? 0) > 0 && pays) jobs.push({ op: "export", token, qty: Math.min(surplus + Math.floor(TARGET[token] / 2), 6) });
   }
   return jobs;

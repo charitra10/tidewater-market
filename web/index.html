@@ -96,10 +96,10 @@
   @keyframes toast { 0% { opacity: 0; transform: translateY(-8px); } 8%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
 
   /* Maren's stall */
-  #shop, #notices { position: fixed; z-index: 10; top: 12px; right: 12px; bottom: 12px; width: min(430px, calc(100vw - 24px)); display: flex; flex-direction: column; overflow: hidden; }
-  #shop header, #notices header { display: flex; gap: 12px; align-items: center; padding: 14px 14px 10px; }
-  #shop header .who, #notices header .who { flex: 1; }
-  #shop header h2, #notices header h2 { font-size: 21px; }
+  #shop, #notices, #bench { position: fixed; z-index: 10; top: 12px; right: 12px; bottom: 12px; width: min(430px, calc(100vw - 24px)); display: flex; flex-direction: column; overflow: hidden; }
+  #shop header, #notices header, #bench header { display: flex; gap: 12px; align-items: center; padding: 14px 14px 10px; }
+  #shop header .who, #notices header .who, #bench header .who { flex: 1; }
+  #shop header h2, #notices header h2, #bench header h2 { font-size: 21px; }
   .chip { display: inline-block; font-size: 12px; padding: 1px 9px; border-radius: 10px; background: var(--paper-2); color: var(--ink-2); margin-right: 4px; }
   .chip.sour, .chip.wary { background: #f1cfc5; color: #8a2f1f; }
   .chip.warm, .chip.delighted { background: #cfe6cf; color: #2c6a3c; }
@@ -161,7 +161,12 @@
 
   /* the notice board */
   #notices { right: auto; left: 12px; } /* on the left, so the board itself stays in view */
-  #notices .intro { margin: 0 14px; font-size: 13px; color: var(--ink-2); }
+  #notices .intro, #bench .intro { margin: 0 14px; font-size: 13px; color: var(--ink-2); }
+  #bench { right: auto; left: 12px; bottom: auto; } /* on the left, so the bench stays in view */
+  #bench-list { padding: 6px 14px 12px; }
+  body.bench-open #ticker, body.bench-open #help, body.bench-open #goal { visibility: hidden; }
+  #tide-event { margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--teal); }
+  #tide-event.on { color: #6b3fa0; }
   #notice-list, #pin { flex: 1; overflow: auto; padding: 6px 14px 10px; }
   #notices h4 { margin: 14px 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--ink-2); }
   .item.yours { background: rgba(217, 164, 65, .13); border-radius: 8px; padding-left: 6px; padding-right: 6px; }
@@ -250,12 +255,14 @@
   <div id="tide-what"></div>
   <div id="tide-price"></div>
   <div id="tide-storm" hidden></div>
+  <div id="tide-event" hidden></div>
   <div id="tide-table" hidden>
     <b>Low tide</b><span>Shore: 2–4 kelp, little driftwood. Reef: 1–2 pearls. Maren pays less for kelp and pearls, more for driftwood.</span>
     <b>High tide</b><span>Shore: 1–3 driftwood, 1–2 kelp. Reef: 0–1 pearls. Maren pays more for kelp and pearls, less for driftwood.</span>
     <b>In between</b><span>Shore: 1–3 kelp, 0–2 driftwood. Reef: 0–2 pearls. Ordinary prices.</span>
     <b>Spring tide</b><span>Every third tide the lows go lower and the highs higher: all of the above, more so.</span>
     <b>Storm</b><span>One every half hour, 4 minutes long, forecast here. The reef is too rough to row to, the shore gives 2–5 driftwood and now and then a pearl, pickaxes break twice as often, and the mainland boat stays in harbour. Maren pays more for pearls, less for driftwood.</span>
+    <b>Events</b><span>One an hour, for one whole tide, forecast here. <i>Fog</i>: the reef gives nothing or a haul. <i>Red tide</i>: no kelp worth keeping, and nobody buys it. <i>Shipwreck</i>: rope, ore and now and then a whole boat wash up on the shore. <i>Festival</i>: Maren asks more for a beacon lens and pays more for pearls. <i>Calm</i>: an extra pearl on the reef, and that hour's first storm never comes.</span>
     <p>The cliffs stand above the tide. Gather when the tide gives; sell when it takes.</p>
   </div>
 </div>
@@ -301,6 +308,16 @@
 </aside>
 
 <div id="why" class="card" role="tooltip" hidden></div>
+
+<aside id="bench" class="card" hidden>
+  <header>
+    <div><svg viewBox="0 0 56 56" width="56" height="56"><circle cx="28" cy="28" r="28" fill="#e6dcc4"/><rect x="10" y="24" width="36" height="6" rx="1.5" fill="#946a40"/><rect x="13" y="30" width="4" height="16" fill="#6e5034"/><rect x="39" y="30" width="4" height="16" fill="#6e5034"/><rect x="13" y="38" width="30" height="3" fill="#7d5a39"/><circle cx="20" cy="20" r="5" fill="none" stroke="#c9a24f" stroke-width="2.5"/><circle cx="20" cy="20" r="2" fill="none" stroke="#c9a24f" stroke-width="1.5"/><path d="M30 22l10-8" stroke="#5b5f66" stroke-width="3" stroke-linecap="round"/><path d="M38 12l5 4" stroke="#5b5f66" stroke-width="4" stroke-linecap="round"/></svg></div>
+    <div class="who"><h2>The workbench</h2><span class="chip">make it yourself</span></div>
+    <button class="x" id="bench-close" title="Leave the workbench (Esc)">×</button>
+  </header>
+  <p class="intro">Twist your own rope and make your own pickaxe from what's in your bag. It costs energy instead of coins: time you're not foraging. Boats and beacon lenses are Maren's work.</p>
+  <div id="bench-list"></div>
+</aside>
 
 <aside id="notices" class="card" hidden>
   <header>

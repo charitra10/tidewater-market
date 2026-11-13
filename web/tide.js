@@ -107,11 +107,17 @@ function stormIn(block) {
 }
 
 /// The storm blowing at `ms`, or else the next one: { active, startMs, endsMs }.
+/// A calm (see `eventAt`) calls off the storm due in it.
 export function stormAt(ms) {
-  const block = Math.floor(ms / STORM_BLOCK_MS);
-  let s = stormIn(block);
-  if (ms >= s.endsMs) s = stormIn(block + 1);
-  return { active: ms >= s.startMs && ms < s.endsMs, ...s };
+  let block = Math.floor(ms / STORM_BLOCK_MS);
+  for (;;) {
+    const s = stormIn(block);
+    if (stormCalledOff(block) || ms >= s.endsMs) {
+      block++;
+      continue;
+    }
+    return { active: ms >= s.startMs, ...s };
+  }
 }
 
 /// How hard it is blowing, 0..1: it builds over the minute before a storm and
@@ -121,6 +127,7 @@ export function stormLevel(ms) {
   const block = Math.floor(ms / STORM_BLOCK_MS);
   let level = 0;
   for (const b of [block - 1, block, block + 1]) {
+    if (stormCalledOff(b)) continue;
     const s = stormIn(b);
     level = Math.max(level, Math.min(1, (ms - (s.startMs - ramp)) / ramp, (s.endsMs + ramp - ms) / ramp));
   }
@@ -141,4 +148,89 @@ export const STORM_TEXT = {
   shore: "storm wrack: driftwood, maybe a pearl",
   reef: "too rough to row out",
   cliffs: "slippery: pickaxes break more",
+};
+
+// ---------------------------------------------------------------------------
+// Events: one every hour, lasting one whole tide (10 minutes), picked by a
+// public hash of the hour, so they can be forecast. Same formula as `event_at`
+// in the contract.
+//   fog        the reef is a gamble: nothing at all, or a haul of pearls
+//   red_tide   the kelp turns: nobody finds any worth keeping, and Maren won't buy it
+//   shipwreck  cargo washes up on the shore: rope, ore, now and then a whole boat
+//   festival   the village wants beacon lenses: Maren asks more for them, and pays more for pearls
+//   calm       a flat sea: an extra pearl on the reef, and the storm due in it never comes
+// ---------------------------------------------------------------------------
+export const EVENT_BLOCK_MS = 60 * 60 * 1000;
+export const EVENTS = ["fog", "red_tide", "shipwreck", "festival", "calm"];
+const EVENT_SALT = 0x5eed7e1d;
+
+const eventKind = (hour) => EVENTS[mix32((hour ^ EVENT_SALT) >>> 0) % EVENTS.length];
+function eventIn(hour) {
+  const kind = eventKind(hour);
+  let startMs;
+  if (kind === "calm") {
+    // a calm settles over the tide in which the hour's first storm was due
+    const storm = stormIn(hour * 2).startMs;
+    startMs = storm - (storm % TIDE_PERIOD_MS);
+  } else {
+    startMs = hour * EVENT_BLOCK_MS + ((mix32((hour ^ EVENT_SALT) >>> 0) >>> 8) % 6) * TIDE_PERIOD_MS;
+  }
+  return { kind, startMs, endsMs: startMs + TIDE_PERIOD_MS };
+}
+/// Is the storm of half hour `block` called off by a calm?
+function stormCalledOff(block) {
+  return block % 2 === 0 && eventKind(block / 2) === "calm";
+}
+/// The event under way at `ms`, or else the next one: { kind, active, startMs, endsMs }.
+export function eventAt(ms) {
+  const hour = Math.floor(ms / EVENT_BLOCK_MS);
+  let e = eventIn(hour);
+  if (ms >= e.endsMs) e = eventIn(hour + 1);
+  return { ...e, active: ms >= e.startMs && ms < e.endsMs };
+}
+
+/// What an event does to Maren's prices. A factor of 0 means she won't buy it at all.
+const EVENT_BID = { red_tide: { kelp: 0 }, festival: { pearl: 1.1 } };
+const EVENT_ASK = { festival: { beacon: 1.25 } };
+export function eventBidFactor(token, event) {
+  return event?.active ? (EVENT_BID[event.kind]?.[token] ?? 1) : 1;
+}
+export function eventAskFactor(token, event) {
+  return event?.active ? (EVENT_ASK[event.kind]?.[token] ?? 1) : 1;
+}
+
+/// Words for each event, for the tide card, the news and the merchants' reasons.
+export const EVENT_TEXT = {
+  fog: {
+    name: "Fog",
+    what: "Thick fog on the water: the reef is a gamble, nothing or a haul of pearls",
+    start: "Fog rolls in off the sea. Row out to the reef and you might find nothing at all, or more pearls than you can carry.",
+    soon: "Fog is coming",
+  },
+  red_tide: {
+    name: "Red tide",
+    what: "The kelp has turned: none worth keeping, and Maren won't buy any",
+    start: "A red tide! The kelp has turned, and nobody will touch it until the water clears. Sell your kelp before it comes, next time.",
+    soon: "A red tide is coming: sell your kelp first",
+    why: "Red tide: she won't touch kelp until the water clears",
+  },
+  shipwreck: {
+    name: "Shipwreck",
+    what: "A wreck's cargo along the tideline: rope, ore, maybe a whole boat",
+    start: "A ship has gone down off the point! Cargo is washing up on the shore: rope, ore, maybe even a boat.",
+    soon: "Wreckage is drifting in",
+  },
+  festival: {
+    name: "Festival",
+    what: "Lantern festival: everyone wants a beacon lens. Maren asks more, and pays more for pearls",
+    start: "It's the lantern festival! The whole village wants a beacon lens, so Maren asks more for hers and pays more for pearls.",
+    soon: "The lantern festival is coming",
+    why: { beacon: "Lantern festival: everyone wants a beacon lens", pearl: "Lantern festival: she needs pearls for lenses" },
+  },
+  calm: {
+    name: "Calm",
+    what: "A flat calm: an extra pearl on the reef, and no storm",
+    start: "The sea has gone flat calm. The reef is clear to the bottom, and the storm that was due won't come.",
+    soon: "A calm is coming: no storm this hour",
+  },
 };

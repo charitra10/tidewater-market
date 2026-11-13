@@ -7,7 +7,7 @@
 import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "./near-lite.js";
 import { TOKENS, NAMES, BLURB, ICONS } from "./icons.js";
 import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld, lightningAt, present } from "./world.js";
-import { tideAt, tideHeight, tideBidFactor, nextTide, tideName, TIDE_TEXT, TIDE_PERIOD_MS, stormAt, stormLevel, stormBidFactor, STORM_TEXT } from "./tide.js";
+import { tideAt, tideHeight, tideBidFactor, nextTide, tideName, TIDE_TEXT, TIDE_PERIOD_MS, stormAt, stormLevel, stormBidFactor, STORM_TEXT, eventAt, EVENT_TEXT } from "./tide.js";
 
 const $ = (id) => document.getElementById(id);
 const RESERVE = 10n ** 23n; // 0.1 NEAR kept back for network fees, not shown as coins
@@ -286,6 +286,8 @@ const TIDE_NEWS = {
 let lastTide = null;
 let lastStorm = null;
 let warnedFor = 0; // the storm we have already warned about
+let lastEvent = null;
+let warnedEvent = 0; // the event we have already warned about
 const STORM_NEWS = {
   warn: "Storm clouds on the horizon: a storm in 3 minutes. Row out to the reef now, or wait it out.",
   start: "A storm is blowing in! The reef is too rough to row to, but the shore is covered in wrack.",
@@ -374,6 +376,23 @@ function renderTide() {
   }
   if (!storm.active && storm.startMs - now <= 180_000) warnedFor = storm.startMs; // (no warning for a storm already upon you)
   if (pv?.lit_ms > 0) renderGoals(); // the countdown to the next storm
+
+  // the hour's event: under way, or forecast once it is less than half an hour off
+  const ev = eventAt(now);
+  S.event = ev;
+  const et = EVENT_TEXT[ev.kind];
+  card.dataset.event = ev.active ? ev.kind : "";
+  $("tide-event").hidden = !ev.active && ev.startMs - now > 30 * 60_000;
+  $("tide-event").className = ev.active ? "on" : "";
+  $("tide-event").textContent = ev.active ? `${et.name} for ${mmss(ev.endsMs - now)}: ${et.what}` : `${et.soon} in ${mmss(ev.startMs - now)}`;
+  if (started && lastEvent) {
+    if (!lastEvent.active && ev.active) toast(et.start, false, 8000);
+    else if (lastEvent.active && !ev.active) toast(`The ${EVENT_TEXT[lastEvent.kind].name.toLowerCase()} is over.`, false, 5000);
+    else if (!ev.active && ev.startMs - now <= 180_000 && warnedEvent !== ev.startMs) toast(`${et.soon}: in ${mmss(ev.startMs - now)}.`, false, 6000);
+    if (lastEvent.active !== ev.active && S.shopOpen) renderShop();
+  }
+  if (!ev.active && ev.startMs - now <= 180_000) warnedEvent = ev.startMs;
+  lastEvent = ev;
   lastStorm = storm;
 
   // say so when the water turns (but not for the tide you arrived on)
@@ -455,7 +474,7 @@ function trend(token, upIsGood, dealer = false) {
 // this panel shows it: hover or focus a price, or tap it on a phone.
 let whyKey = null; // "ask:pickaxe", "bid:kelp" or "silas:ore"
 let whyPinned = false; // opened by a tap or click, so it stays until dismissed
-const whyButton = (kind, row) => `<button class="why" data-why="${kind}:${row.token}" aria-describedby="why" title="Why this price?">${row.price}</button>`;
+const whyButton = (kind, row, label = row.price) => `<button class="why" data-why="${kind}:${row.token}" aria-describedby="why" title="Why this price?">${label}</button>`;
 function whyRow(key) {
   const m = S.market;
   const [kind, token] = key.split(":");
@@ -468,7 +487,7 @@ function whyHtml(key) {
   const w = row?.why;
   if (!w) return "";
   const kind = key.split(":")[0];
-  const title = { ask: `She asks ${row.price}`, bid: `She'd pay ${row.price}`, silas: w.price ? `He'd pay ${row.price}` : "He isn't buying" }[kind];
+  const title = { ask: `She asks ${row.price}`, bid: row.price ? `She'd pay ${row.price}` : "She isn't buying", silas: w.price ? `He'd pay ${row.price}` : "He isn't buying" }[kind];
   const steps = w.steps
     .map((st) => `<tr class="${st.factor === 1 ? "flat" : ""}"><td>${st.note}</td><td>${st.value !== undefined ? whyNum(st.value) : "×" + Math.round(st.factor * 100) / 100}</td></tr>`)
     .join("");
@@ -568,6 +587,7 @@ function refresh(fresh = false) {
       updateTicker();
       if (S.shopOpen) renderShop();
       if (S.boardOpen) renderNotices();
+      if (S.benchOpen) renderBench();
     } catch (e) {
       console.warn("refresh:", e.message);
     } finally {
@@ -714,6 +734,8 @@ async function forage(h) {
     });
     sfx.found();
     if (h.id === "shore" && r.storm && r.found[idx("pearl")] > 0) stormGoal("stormWrack");
+    if (r.event === "shipwreck" && r.found[idx("boat")] > 0) toast("A whole boat, upturned on the sand! It's yours now.", false, 7000);
+    else if (r.event === "fog" && h.id === "reef") toast(r.found[idx("pearl")] ? "Out of the fog, a haul of pearls!" : "Nothing but fog out there today.", !r.found[idx("pearl")]);
     if (r.tool_broke) {
       float("Your pickaxe broke!", "pickaxe", { bad: true, wait: n * 0.35 });
       toast("Snap! Your pickaxe broke. Maren will sell you another.", true);
@@ -763,6 +785,7 @@ function interact(id) {
   if (id === "stall") openShop();
   else if (id === "dealer") openShop("silas");
   else if (id === "board") openNotices();
+  else if (id === "bench") openBench();
   else if (id === "lighthouse") lighthouse();
   else forage(h);
 }
@@ -897,9 +920,9 @@ function renderShop() {
       const qty = Math.max(1, Math.min(have, sellQty[b.token] ?? have));
       const his = m.dealer?.open ? m.dealer.board.find((x) => x.token === b.token)?.price : null;
       const vs = his ? ` <span class="tide-note ${his > b.price ? "up" : "down"}">Silas pays about ${his}</span>` : ""; // green: you'd get more from him
-      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${whyButton("bid", b)} each.${tideNote(b.token)}${vs}</div></div>
+      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and ${b.price == null ? `${whyButton("bid", b, "won't buy any")} right now` : `pays about ${whyButton("bid", b)} each`}.${b.price == null ? "" : tideNote(b.token)}${vs}</div></div>
         <div class="buy">${
-          have > 0
+          have > 0 && b.price != null
             ? `<span class="qty"><button data-qty-token="${b.token}" data-d="-1">−</button>${qty}<button data-qty-token="${b.token}" data-d="1">+</button></span><button class="btn small" data-open="buy" data-token="${b.token}" data-qty="${qty}">Sell</button>`
             : ""
         }</div></div>`;
@@ -986,6 +1009,65 @@ async function settle(deal) {
   }
 }
 
+// ---------- the workbench: make rope and pickaxes yourself ----------
+// The same recipes as Maren's, from what is in your bag, for energy instead of
+// coins (`player_craft` in the contract). Boats and beacon lenses are her work.
+const BENCH = [
+  { token: "rope", energy: 1, needs: { kelp: 3 }, busy: "Twisting rope" },
+  { token: "pickaxe", energy: 2, needs: { driftwood: 2, rope: 1 }, busy: "Making a pickaxe" },
+];
+function openBench() {
+  if (S.shopOpen) closeShop();
+  if (S.boardOpen) closeNotices();
+  S.benchOpen = true;
+  document.body.classList.add("bench-open");
+  target = null;
+  $("bench").hidden = false;
+  renderBench();
+}
+function closeBench() {
+  S.benchOpen = false;
+  document.body.classList.remove("bench-open");
+  $("bench").hidden = true;
+}
+function renderBench() {
+  if (!pv) return;
+  const energy = energyNow().e;
+  $("bench-list").innerHTML = BENCH.map((b) => {
+    const needs = Object.entries(b.needs)
+      .map(([t, n]) => `<span class="need ${pv.items[idx(t)] >= n ? "ok" : "short"}">${ICONS[t]}${Math.min(pv.items[idx(t)], n)}/${n}</span>`)
+      .join("");
+    const short = Object.entries(b.needs).some(([t, n]) => pv.items[idx(t)] < n);
+    const tired = energy < b.energy;
+    const ask = b.token === "pickaxe" ? marenAsk("pickaxe") : null;
+    const compare = ask ? ` Maren asks ${ask} for one.` : "";
+    const why = short ? "You're missing some of the makings." : tired ? "You're too tired: wait for your energy." : "";
+    return `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]} <span class="each">${b.energy} energy</span></div>
+      <div class="sub">${needs} You have ${pv.items[idx(b.token)]}.${compare} ${why}</div></div>
+      <div class="buy"><button class="btn small" data-make="${b.token}" ${short || tired || busy ? "disabled" : ""}>Make</button></div></div>`;
+  }).join("");
+}
+async function make(token) {
+  const b = BENCH.find((x) => x.token === token);
+  if (busy || !b) return;
+  busy = true;
+  renderBench();
+  S.busyText = b.busy;
+  try {
+    await call("player_craft", { token_id: token }, 0n, `Made ${NAMES[token].toLowerCase()} at the workbench`);
+    sfx.found();
+    float(`+1 ${NAMES[token].toLowerCase()}`, token);
+    toast(token === "rope" ? "Three strands of kelp, twisted into rope." : "A pickaxe of your own. Rough, but it'll do for the cliffs.");
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    S.busyText = "";
+    busy = false;
+    await refresh();
+    if (S.benchOpen) renderBench();
+  }
+}
+
 // ---------- the notice board: players sell to players ----------
 let ntab = "buy";
 const buyQty = {}; // notice id -> how many to buy
@@ -1025,7 +1107,7 @@ function noticeRow(l) {
   const merchant = cfg && (l.seller === cfg.merchantId || l.seller === cfg.dealerId);
   if (merchant && l.why) compare = l.why;
   else if (merchant) compare = l.seller === cfg.merchantId ? "from her shelves: surplus for Silas, or for you" : "from his hold: pearls for Maren, or for you";
-  else if (RAW.includes(l.token)) compare = `Maren pays about ${fmt(marenBid(l.token))}`;
+  else if (RAW.includes(l.token)) compare = marenBid(l.token) ? `Maren pays about ${fmt(marenBid(l.token))}` : "Maren isn't buying it right now";
   else {
     const ask = marenAsk(l.token);
     compare = ask === null ? `<span class="good">Maren is sold out</span>` : l.unit < ask ? `<span class="good">Maren asks ${ask}</span>` : `Maren asks ${ask}`;
@@ -1228,6 +1310,7 @@ addEventListener("keydown", (e) => {
     else if (!$("ledger").hidden) $("ledger").hidden = true;
     else if (S.shopOpen) closeShop();
     else if (S.boardOpen) closeNotices();
+    else if (S.benchOpen) closeBench();
     return;
   }
   if (typingInField() || !started) return;
@@ -1238,7 +1321,7 @@ addEventListener("keydown", (e) => {
   }
   if ((k === "e" || k === " " || k === "enter") && !e.repeat) {
     e.preventDefault();
-    if (S.shopOpen || S.boardOpen) return;
+    if (S.shopOpen || S.boardOpen || S.benchOpen) return;
     if (S.near) interact(S.near);
   }
 });
@@ -1250,7 +1333,7 @@ let touch = matchMedia("(pointer: coarse)").matches;
 addEventListener("pointerdown", (e) => e.pointerType === "touch" && (touch = true), { capture: true });
 let useShown = null;
 function updateUseButton() {
-  const h = touch && started && !busy && !S.shopOpen && !S.boardOpen && S.near ? HOTSPOTS.find((x) => x.id === S.near) : null;
+  const h = touch && started && !busy && !S.shopOpen && !S.boardOpen && !S.benchOpen && S.near ? HOTSPOTS.find((x) => x.id === S.near) : null;
   if (h === useShown) return;
   useShown = h;
   $("use").hidden = !h;
@@ -1264,6 +1347,7 @@ canvas.addEventListener("pointerdown", (e) => {
   if (!started || busy) return;
   if (S.shopOpen) closeShop();
   if (S.boardOpen) closeNotices();
+  if (S.benchOpen) closeBench();
   const rect = canvas.getBoundingClientRect();
   const x = ((e.clientX - rect.left) * W) / rect.width;
   const y = ((e.clientY - rect.top) * H) / rect.height;
@@ -1290,6 +1374,11 @@ canvas.addEventListener("pointerdown", (e) => {
 
 $("shop-close").onclick = closeShop;
 $("notices-close").onclick = closeNotices;
+$("bench-close").onclick = closeBench;
+$("bench-list").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-make]");
+  if (b && !b.disabled) make(b.dataset.make);
+});
 $("ntab-buy").onclick = () => {
   ntab = "buy";
   renderNotices();
@@ -1410,7 +1499,7 @@ function frame(now) {
   S.storm.level = stormLevel(nowMs());
   updateAmbient(t);
 
-  if (started && !busy && !S.shopOpen && !S.boardOpen) {
+  if (started && !busy && !S.shopOpen && !S.boardOpen && !S.benchOpen) {
     let dx = (keys.has("d") || keys.has("arrowright") ? 1 : 0) - (keys.has("a") || keys.has("arrowleft") ? 1 : 0);
     let dy = (keys.has("s") || keys.has("arrowdown") ? 1 : 0) - (keys.has("w") || keys.has("arrowup") ? 1 : 0);
     if (dx || dy) target = null;

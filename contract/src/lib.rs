@@ -112,14 +112,77 @@ fn storm_in(block: u64) -> (u64, u64) {
 }
 
 /// The storm blowing at `ms`, or else the next one: (blowing?, start ms, end ms).
+/// A calm (see `event_at`) calls off the storm due in it.
 pub fn storm_at(ms: u64) -> (bool, u64, u64) {
-    let block = ms / STORM_BLOCK_MS;
-    let (mut start, mut end) = storm_in(block);
-    if ms >= end {
-        (start, end) = storm_in(block + 1);
+    let mut block = ms / STORM_BLOCK_MS;
+    loop {
+        let (start, end) = storm_in(block);
+        if storm_called_off(block) || ms >= end {
+            block += 1; // (never two in a row: only the first half hour of an hour can be called off)
+            continue;
+        }
+        return (ms >= start, start, end);
     }
-    (ms >= start && ms < end, start, end)
 }
+
+/// Events: one every hour, lasting one whole tide (10 minutes), picked by a
+/// public hash of the hour like the storms, so the game can forecast them
+/// (`eventAt` in web/tide.js has the same formula).
+///   fog        the reef is a gamble: nothing at all, or a haul of pearls
+///   red_tide   the kelp turns: nobody finds any worth keeping (and Maren won't buy it)
+///   shipwreck  cargo washes up on the shore: rope, ore, now and then a whole boat
+///   festival   the village wants beacon lenses (Maren's prices; nothing changes on-chain)
+///   calm       a flat sea: an extra pearl on the reef, and the storm due in it never comes
+pub const EVENT_BLOCK_MS: u64 = 60 * 60 * 1000;
+pub const EVENTS: [&str; 5] = ["fog", "red_tide", "shipwreck", "festival", "calm"];
+pub const FOG: usize = 0;
+pub const RED_TIDE: usize = 1;
+pub const SHIPWRECK: usize = 2;
+pub const FESTIVAL: usize = 3;
+pub const CALM: usize = 4;
+const EVENT_SALT: u32 = 0x5eed_7e1d;
+
+fn event_kind(hour: u64) -> usize {
+    (mix32(hour as u32 ^ EVENT_SALT) % EVENTS.len() as u32) as usize
+}
+
+/// The event of hour `hour`: (kind, start ms, end ms).
+fn event_in(hour: u64) -> (usize, u64, u64) {
+    let kind = event_kind(hour);
+    let start = if kind == CALM {
+        // a calm settles over the tide in which the hour's first storm was due
+        let (storm, _) = storm_in(hour * 2);
+        storm - storm % TIDE_PERIOD_MS
+    } else {
+        hour * EVENT_BLOCK_MS + ((mix32(hour as u32 ^ EVENT_SALT) >> 8) % 6) as u64 * TIDE_PERIOD_MS
+    };
+    (kind, start, start + TIDE_PERIOD_MS)
+}
+
+/// Is the storm of half hour `block` called off by a calm?
+fn storm_called_off(block: u64) -> bool {
+    block % 2 == 0 && event_kind(block / 2) == CALM
+}
+
+/// The event under way at `ms`, or else the next one: (kind, under way?, start ms, end ms).
+pub fn event_at(ms: u64) -> (usize, bool, u64, u64) {
+    let hour = ms / EVENT_BLOCK_MS;
+    let (mut kind, mut start, mut end) = event_in(hour);
+    if ms >= end {
+        (kind, start, end) = event_in(hour + 1);
+    }
+    (kind, ms >= start && ms < end, start, end)
+}
+
+/// The event under way at `ms`, if any.
+pub fn event_now(ms: u64) -> Option<usize> {
+    let (kind, on, _, _) = event_at(ms);
+    on.then_some(kind)
+}
+
+/// What players can make themselves at the workbench, and the energy it takes:
+/// rope and pickaxes (same recipes as Maren's). Boats and beacon lenses are her work.
+pub const PLAYER_CRAFT: [(usize, u32); 2] = [(ROPE, 1), (PICKAXE, 2)];
 
 pub const MAX_TRADES: usize = 40;
 pub const MAX_BLOCKED: usize = 30;
@@ -401,6 +464,13 @@ pub struct BoardBuyResult {
     pub sale: Option<BoardSale>,
 }
 
+/// What the workbench made.
+#[near(serializers = [json])]
+pub struct Crafted {
+    pub token_id: String,
+    pub energy_left: u32,
+}
+
 #[near(serializers = [json])]
 pub struct ForageResult {
     pub spot: String,
@@ -413,6 +483,8 @@ pub struct ForageResult {
     pub spring: bool,
     /// Was a storm blowing?
     pub storm: bool,
+    /// The event under way, if any ("fog", "red_tide", "shipwreck", "festival", "calm").
+    pub event: Option<String>,
 }
 
 #[near(serializers = [json])]
@@ -425,6 +497,11 @@ pub struct TideView {
     pub storm: bool,
     pub storm_starts_ms: u64,
     pub storm_ends_ms: u64,
+    /// The event under way, or else the next one, and when it starts and ends.
+    pub event: String,
+    pub event_on: bool,
+    pub event_starts_ms: u64,
+    pub event_ends_ms: u64,
     pub now_ms: u64,
 }
 
@@ -774,13 +851,7 @@ impl Market {
             !(storm && spot == "reef"),
             "The sea is too rough to row out to the reef. Wait for the storm to pass"
         );
-        self.refresh_energy(&mut p);
-        require!(p.energy >= cost, "Not enough energy");
-        if p.energy == self.energy_max {
-            // The refill clock starts when energy first drops below the maximum.
-            p.energy_at_ms = env::block_timestamp_ms();
-        }
-        p.energy -= cost;
+        self.spend_energy(&mut p, cost);
         p.forages += 1;
 
         // Per-call randomness: the block's seed mixed with the player and a counter.
@@ -792,6 +863,7 @@ impl Market {
         let mut found = [0u32; N];
         let mut tool_broke = false;
         let (phase, spring) = tide_at(now);
+        let event = event_now(now);
         let (a, b) = (r[0] as u32, r[1] as u32);
         match spot.as_str() {
             // A storm covers the shore in wrack: driftwood, and now and then a pearl torn off the reef.
@@ -828,6 +900,21 @@ impl Market {
                 found[KELP] = 1 + b % 2; // 1-2
             }
         }
+        match (event, spot.as_str()) {
+            // the kelp has turned: nothing worth keeping
+            (Some(RED_TIDE), _) => found[KELP] = 0,
+            // fog on the reef: you row about blind, and find nothing or a haul
+            (Some(FOG), "reef") => found[PEARL] = if r[4] % 2 == 0 { 0 } else { 2 * found[PEARL] + 1 },
+            // still water, clear to the bottom
+            (Some(CALM), "reef") => found[PEARL] += 1,
+            // a wreck's cargo along the tideline
+            (Some(SHIPWRECK), "shore") => {
+                found[ROPE] += (r[5] % 3 == 0) as u32; // one trip in three
+                found[ORE] += (r[6] % 6 == 0) as u32; // one in six
+                found[BOAT] += (r[7] % 50 == 0) as u32; // one in fifty: a whole boat, upturned on the sand
+            }
+            _ => {}
+        }
         let mut minted = Vec::new();
         for t in 0..N {
             if found[t] > 0 {
@@ -847,7 +934,7 @@ impl Market {
         let tide = TIDE_PHASES[phase].to_string();
         emit_game(
             "forage",
-            json!({ "player": id, "spot": spot, "found": found.to_vec(), "tool_broke": tool_broke, "tide": tide, "spring": spring, "storm": storm }),
+            json!({ "player": id, "spot": spot, "found": found.to_vec(), "tool_broke": tool_broke, "tide": tide, "spring": spring, "storm": storm, "event": event.map(|e| EVENTS[e]) }),
         );
         ForageResult {
             spot,
@@ -857,7 +944,41 @@ impl Market {
             tide,
             spring,
             storm,
+            event: event.map(|e| EVENTS[e].to_string()),
         }
+    }
+
+    /// Make rope or a pickaxe yourself at the workbench, from what is in your
+    /// bag (the same recipes Maren uses). It costs energy: rope 1, a pickaxe 2,
+    /// so making a tool is time you are not foraging. Boats and beacon lenses
+    /// are Maren's work.
+    pub fn player_craft(&mut self, token_id: String) -> Crafted {
+        let id = env::predecessor_account_id();
+        let mut p = self.player(&id);
+        let out = token_index(&token_id);
+        let (_, energy) = *PLAYER_CRAFT
+            .iter()
+            .find(|(o, _)| *o == out)
+            .unwrap_or_else(|| env::panic_str("Only rope and pickaxes can be made at the workbench. Maren builds boats and beacon lenses"));
+        let (_, inputs) = RECIPES.iter().find(|(o, _)| *o == out).expect("every workbench item has a recipe");
+        for (t, n) in inputs.iter() {
+            require!(p.items[*t] >= *n, format!("You need {} {} for that", n, TOKENS[*t]));
+        }
+        self.spend_energy(&mut p, energy);
+        let mut burned = Vec::new();
+        for (t, n) in inputs.iter() {
+            p.items[*t] -= n;
+            self.supply[*t] -= *n as u64;
+            burned.push((*t, *n));
+        }
+        p.items[out] += 1;
+        self.supply[out] += 1;
+        let energy_left = p.energy;
+        self.players.insert(id.clone(), p);
+        emit_mt("mt_burn", "owner_id", &id, None, &burned);
+        emit_mt("mt_mint", "owner_id", &id, None, &[(out, 1)]);
+        emit_game("player_craft", json!({ "player": id, "token_id": token_id }));
+        Crafted { token_id, energy_left }
     }
 
     /// Take a deal the merchant offered you. For a `Sell` quote, attach the
@@ -1688,6 +1809,7 @@ impl Market {
         let (phase, spring) = tide_at(now);
         let quarter = TIDE_PERIOD_MS / 4;
         let (storm, storm_starts_ms, storm_ends_ms) = storm_at(now);
+        let (event, event_on, event_starts_ms, event_ends_ms) = event_at(now);
         TideView {
             phase: TIDE_PHASES[phase].to_string(),
             spring,
@@ -1695,6 +1817,10 @@ impl Market {
             storm,
             storm_starts_ms,
             storm_ends_ms,
+            event: EVENTS[event].to_string(),
+            event_on,
+            event_starts_ms,
+            event_ends_ms,
             now_ms: now,
         }
     }
@@ -1846,6 +1972,17 @@ impl Market {
         }
         let at = p.energy_at_ms + gained as u64 * self.energy_regen_ms;
         (energy, at, self.energy_regen_ms - (now - at))
+    }
+
+    /// Take `cost` energy from a player (after topping it up for the time passed).
+    fn spend_energy(&self, p: &mut Player, cost: u32) {
+        self.refresh_energy(p);
+        require!(p.energy >= cost, "Not enough energy");
+        if p.energy == self.energy_max {
+            // The refill clock starts when energy first drops below the maximum.
+            p.energy_at_ms = env::block_timestamp_ms();
+        }
+        p.energy -= cost;
     }
 
     fn refresh_energy(&self, p: &mut Player) {
@@ -2175,10 +2312,10 @@ mod tests {
             .map(|i| {
                 let n = m.get_player(alice()).unwrap().forages as u64;
                 let first = SPRING_EVERY * (4 * n + 2) + if spring { 0 } else { 1 };
-                let ts = (0..4)
+                let ts = (0..12)
                     .map(|skip| (first + SPRING_EVERY * skip) * TIDE_PERIOD_MS / 1000 + phase * 150 + 7)
-                    .find(|ts| !storm_at(ts * 1000).0)
-                    .expect("a calm tide");
+                    .find(|ts| quiet(ts * 1000))
+                    .expect("a quiet tide");
                 ctx_seed(alice(), ZERO, ts, i);
                 m.forage(spot.into())
             })
@@ -2187,9 +2324,20 @@ mod tests {
 
     // ---------------- storms ----------------
 
-    /// A time `secs` seconds into the storm of half hour `block`.
+    /// A time `secs` seconds into the storm of half hour `block` (or of the next
+    /// half hour whose storm blows with no event under way, so tests of storms
+    /// are not tests of calms, red tides or wrecks too).
     fn in_storm(block: u64, secs: u64) -> u64 {
-        storm_in(block).0 / 1000 + secs
+        let mut b = block;
+        while storm_called_off(b) || (0..=STORM_MS / 1000).any(|s| event_now(storm_in(b).0 + s * 1000).is_some()) {
+            b += 1;
+        }
+        storm_in(b).0 / 1000 + secs
+    }
+
+    /// No storm and no event: the plain tide.
+    fn quiet(ms: u64) -> bool {
+        !storm_at(ms).0 && event_now(ms).is_none()
     }
 
     #[test]
@@ -2201,8 +2349,10 @@ mod tests {
         for (ms, blowing, start, end) in [
             (0, false, 720_000, 960_000),
             (1_000_000, false, 3_240_000, 3_480_000),
-            (1_794_543_000_000, true, 1_794_543_000_000, 1_794_543_240_000),
-            (1_794_543_239_999, true, 1_794_543_000_000, 1_794_543_240_000),
+            // a calm hour: the storm due at 1_794_543_000_000 is called off
+            (1_794_543_000_000, false, 1_794_544_800_000, 1_794_545_040_000),
+            (1_794_544_800_000, true, 1_794_544_800_000, 1_794_545_040_000),
+            (1_794_545_039_999, true, 1_794_544_800_000, 1_794_545_040_000),
         ] {
             assert_eq!(storm_at(ms), (blowing, start, end), "at {ms} ms");
         }
@@ -2216,6 +2366,177 @@ mod tests {
         ctx(alice(), ZERO, in_storm(5, 60));
         let t = m.get_tide();
         assert!(t.storm && t.storm_starts_ms == storm_in(5).0 && t.storm_ends_ms == storm_in(5).1);
+    }
+
+    // ---------------- events ----------------
+
+    #[test]
+    fn events_come_on_a_public_schedule() {
+        // the same table is checked in server/tide.test.js
+        for (ms, kind, on, start, end) in [
+            (0, "fog", false, 600_000, 1_200_000),
+            (1_000_000, "fog", true, 600_000, 1_200_000),
+            (18_000_001, "festival", false, 18_600_000, 19_200_000),
+            (1_794_543_000_000, "calm", true, 1_794_543_000_000, 1_794_543_600_000),
+            (1_794_560_000_000, "fog", false, 1_794_560_400_000, 1_794_561_000_000),
+        ] {
+            let (k, o, s, e) = event_at(ms);
+            assert_eq!((EVENTS[k], o, s, e), (kind, on, start, end), "at {ms} ms");
+        }
+        let mut count = [0; 5];
+        for hour in 0..5000u64 {
+            let (kind, start, end) = event_in(hour);
+            count[kind] += 1;
+            // one whole tide, inside its hour, starting as a tide starts
+            assert!(start >= hour * EVENT_BLOCK_MS && end <= (hour + 1) * EVENT_BLOCK_MS && end - start == TIDE_PERIOD_MS && start % TIDE_PERIOD_MS == 0);
+            let (first_storm, _) = storm_in(hour * 2);
+            if kind == CALM {
+                // the storm that was due in the calm never comes, and the hour's second one still does
+                assert!(first_storm >= start && first_storm < end);
+                assert!(storm_called_off(hour * 2) && !storm_called_off(hour * 2 + 1));
+                assert!(!(0..240).any(|s| storm_at(first_storm + s * 1000).0));
+            } else {
+                assert!(!storm_called_off(hour * 2));
+                assert!(storm_at(first_storm).0);
+            }
+        }
+        for (kind, n) in count.iter().enumerate() {
+            assert!(*n > 800 && *n < 1200, "{} came {n} times in 5000 hours", EVENTS[kind]);
+        }
+        let m = setup();
+        ctx(alice(), ZERO, 1_000);
+        let t = m.get_tide();
+        assert_eq!((t.event.as_str(), t.event_on, t.event_starts_ms, t.event_ends_ms), ("fog", true, 600_000, 1_200_000));
+    }
+
+    /// A time `secs` seconds into the `n`-th event of `kind` with no storm in it
+    /// (counting from hour `from`).
+    fn in_event(kind: usize, from: u64, n: usize, secs: u64) -> u64 {
+        let stormless = |h: &u64| {
+            let (_, start, end) = event_in(*h);
+            !(start..end).step_by(5_000).any(|ms| storm_at(ms).0)
+        };
+        let hour = (from..).filter(|h| event_kind(*h) == kind).filter(stormless).nth(n).unwrap();
+        event_in(hour).1 / 1000 + secs
+    }
+
+    #[test]
+    fn a_red_tide_spoils_the_kelp() {
+        let mut m = setup();
+        give(&mut m, alice(), BOAT, 1);
+        for i in 0..12u64 {
+            let at = in_event(RED_TIDE, 10, i as usize, 200);
+            for spot in ["shore", "reef"] {
+                ctx_seed(alice(), ZERO, at + if spot == "reef" { 30 } else { 0 }, i as u8);
+                let r = m.forage(spot.into());
+                assert_eq!(r.event.as_deref(), Some("red_tide"));
+                assert_eq!(r.found[KELP], 0, "no kelp at the {spot}");
+            }
+        }
+    }
+
+    #[test]
+    fn fog_makes_the_reef_a_gamble_and_a_calm_makes_it_generous() {
+        let mut m = setup();
+        give(&mut m, alice(), BOAT, 1);
+        let (mut empty, mut hauls) = (0, 0);
+        for i in 0..40u64 {
+            ctx_seed(alice(), ZERO, in_event(FOG, 10, i as usize, 300), i as u8);
+            let r = m.forage("reef".into());
+            assert_eq!(r.event.as_deref(), Some("fog"));
+            match r.found[PEARL] {
+                0 => empty += 1,
+                n => {
+                    assert!(n % 2 == 1 && n <= 7, "a haul is odd and at most 2x3+1: {n}");
+                    hauls += 1
+                }
+            }
+        }
+        assert!(empty > 5 && hauls > 5, "{empty} empty trips, {hauls} hauls");
+        for i in 0..20u64 {
+            ctx_seed(alice(), ZERO, in_event(CALM, 5000, i as usize, 30), i as u8); // (later hours: the clock only moves forward)
+            let r = m.forage("reef".into());
+            assert_eq!((r.event.as_deref(), r.storm), (Some("calm"), false));
+            assert!(r.found[PEARL] >= 1, "always at least a pearl in a calm");
+        }
+    }
+
+    #[test]
+    fn a_shipwreck_washes_cargo_up_on_the_shore() {
+        let mut m = setup();
+        let before: Vec<u128> = (0..N).map(|t| m.mt_supply(TOKENS[t].into()).unwrap().0).collect();
+        let mut found = [0u32; N];
+        for i in 0..300u64 {
+            let at = in_event(SHIPWRECK, 10, (i / 30) as usize, 5 + (i % 30) * 19);
+            ctx_seed(alice(), ZERO, at, i as u8);
+            let r = m.forage("shore".into());
+            assert_eq!(r.event.as_deref(), Some("shipwreck"));
+            for t in 0..N {
+                found[t] += r.found[t];
+            }
+        }
+        assert!(found[ROPE] > 50 && found[ROPE] < 150, "rope {}", found[ROPE]);
+        assert!(found[ORE] > 20 && found[ORE] < 90, "ore {}", found[ORE]);
+        assert!(found[BOAT] < 20, "boats are rare: {}", found[BOAT]);
+        assert_eq!(found[PICKAXE] + found[BEACON], 0);
+        // every item came into the world through the supply
+        for t in [ROPE, ORE, BOAT] {
+            assert_eq!(m.mt_supply(TOKENS[t].into()).unwrap().0, before[t] + found[t] as u128);
+        }
+    }
+
+    // ---------------- the workbench ----------------
+
+    #[test]
+    fn players_make_rope_and_pickaxes_at_the_workbench() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 6);
+        give(&mut m, alice(), DRIFTWOOD, 2);
+        let supply = |m: &Market, t: usize| m.mt_supply(TOKENS[t].into()).unwrap().0;
+        let before: Vec<u128> = (0..N).map(|t| supply(&m, t)).collect();
+        ctx(alice(), ZERO, 10_000);
+        let start = m.get_player(alice()).unwrap().energy;
+        assert_eq!(m.player_craft("rope".into()).energy_left, start - 1);
+        let r = m.player_craft("pickaxe".into());
+        assert_eq!(r.energy_left, start - 3);
+        let p = m.get_player(alice()).unwrap();
+        assert_eq!((p.items[KELP], p.items[DRIFTWOOD], p.items[ROPE], p.items[PICKAXE]), (3, 0, 0, 1));
+        // three kelp and two driftwood went in; one pickaxe came out (the rope went into it)
+        assert_eq!(supply(&m, KELP), before[KELP] - 3);
+        assert_eq!(supply(&m, DRIFTWOOD), before[DRIFTWOOD] - 2);
+        assert_eq!(supply(&m, ROPE), before[ROPE]);
+        assert_eq!(supply(&m, PICKAXE), before[PICKAXE] + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Maren builds boats and beacon lenses")]
+    fn boats_are_marens_work() {
+        let mut m = setup();
+        give(&mut m, alice(), DRIFTWOOD, 4);
+        give(&mut m, alice(), ROPE, 2);
+        give(&mut m, alice(), ORE, 2);
+        ctx(alice(), ZERO, 10_000);
+        m.player_craft("boat".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "You need 3 kelp")]
+    fn the_workbench_needs_the_makings() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 2);
+        ctx(alice(), ZERO, 10_000);
+        m.player_craft("rope".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough energy")]
+    fn the_workbench_takes_energy() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 60);
+        ctx(alice(), ZERO, 10_000);
+        for _ in 0..20 {
+            m.player_craft("rope".into());
+        }
     }
 
     #[test]

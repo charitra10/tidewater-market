@@ -10,7 +10,7 @@
 //   --keep                         keep the guest accounts afterwards (by default
 //                                  they are closed and their NEAR goes back to the guest fund)
 import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "../web/near-lite.js";
-import { tideAt, tideName, stormAt } from "../web/tide.js";
+import { tideAt, tideName, stormAt, eventAt } from "../web/tide.js";
 
 const BASE = process.env.GAME_URL || "http://localhost:8787";
 const FULL = process.argv.includes("--full");
@@ -73,7 +73,11 @@ async function forage(spot, times) {
   }
 }
 /// What the shore may give at each tide: [kelp, driftwood] as [min, max].
-function shoreRange({ tide, spring, storm }) {
+function shoreRange({ tide, spring, storm, event }) {
+  const r = shoreRangeByTide({ tide, spring, storm });
+  return event === "red_tide" ? [[0, 0], r[1]] : r; // a red tide: no kelp worth keeping
+}
+function shoreRangeByTide({ tide, spring, storm }) {
   if (storm) return [[1, 3], [2, 5]]; // storm wrack
   if (tide === "low") return [[spring ? 3 : 2, spring ? 5 : 4], [0, 1]];
   if (tide === "high") return [[1, 2], spring ? [2, 4] : [1, 3]];
@@ -172,6 +176,34 @@ await forage("cliffs", 1);
 p = await player();
 check(have(p, "ore") >= 1, "mined ore with it");
 
+// The workbench: make rope, then a pickaxe, for energy instead of coins.
+console.log(`\n▸ The workbench`);
+if (eventAt(Date.now()).active && eventAt(Date.now()).kind === "red_tide") console.log("  (a red tide: no kelp to twist into rope; skipping)");
+else {
+  for (let i = 0; i < 12; i++) {
+    p = await player();
+    if (have(p, "kelp") >= 3 && have(p, "driftwood") >= 2) break;
+    await waitEnergy(1);
+    await forage("shore", 1);
+  }
+  await waitEnergy(3);
+  const before = await player();
+  if (have(before, "kelp") < 3 || have(before, "driftwood") < 2) console.log("  (the shore was stingy: not enough kelp and driftwood; skipping)");
+  else {
+    const rope = (await call("player_craft", { token_id: "rope" })).value;
+    say("me", `twisted 3 kelp into rope  [energy ${rope.energy_left}]`);
+    const mid = await player();
+    check(have(mid, "rope") === have(before, "rope") + 1 && have(mid, "kelp") === have(before, "kelp") - 3, "made rope at the workbench from 3 kelp");
+    const pick = (await call("player_craft", { token_id: "pickaxe" })).value;
+    say("me", `made a pickaxe from 2 driftwood and the rope  [energy ${pick.energy_left}]`);
+    const after = await player();
+    check(have(after, "pickaxe") === have(before, "pickaxe") + 1 && have(after, "rope") === have(before, "rope") && pick.energy_left === rope.energy_left - 2,
+      "made my own pickaxe (2 energy), so now I own one more");
+    const boat = await call("player_craft", { token_id: "boat" }).then(() => "made", (e) => e.message);
+    check(/Maren builds boats/.test(boat), "the workbench won't make a boat: that's Maren's work");
+  }
+}
+
 console.log(`\n▸ The notice board`);
 // A neighbour comes ashore and pins some kelp at their own price; I buy it.
 const nkp = await generateKey();
@@ -180,32 +212,39 @@ const { accountId: neighbour } = await api("/api/guest", { publicKey: nkp.public
 console.log(`  a neighbour came ashore: ${neighbour}`);
 const ncall = (method, args = {}, deposit = 0n) => near.send(neighbour, nkey, cfg.contract, [actions.functionCall(method, args, 30n * TGAS, deposit)]);
 await ncall("join");
-await ncall("forage", { spot: "shore" });
-const kelpBid = (await api("/api/market?player=" + me)).history.prices.kelp.at(-1);
-const unit = Math.max(6, Math.ceil(kelpBid) + 3); // more than Maren pays, so she leaves it to players
-const notice = (await ncall("list_item", { token_id: "kelp", qty: 1, unit_price: coinsToYocto(unit).toString() })).value;
-say("them", `pinned 1 kelp on the board at ${unit} coins`);
+// (what they found: kelp, or driftwood if a red tide has spoiled the kelp)
+let theirBag = null;
+for (let i = 0; i < 4; i++) {
+  await ncall("forage", { spot: "shore" });
+  theirBag = (await near.view(cfg.contract, "get_player", { account_id: neighbour })).items;
+  if (theirBag[0] > 0 || theirBag[1] > 0) break;
+}
+const ware = theirBag[0] > 0 ? "kelp" : "driftwood";
+const wareBid = (await api("/api/market?player=" + me)).history.prices[ware].at(-1) ?? 0;
+const unit = Math.max(6, Math.ceil(wareBid) + 3); // more than Maren pays, so she leaves it to players
+const notice = (await ncall("list_item", { token_id: ware, qty: 1, unit_price: coinsToYocto(unit).toString() })).value;
+say("them", `pinned 1 ${ware} on the board at ${unit} coins`);
 await sleep(2600); // let their gas refunds land before measuring their purse
 const theirs = await near.balance(neighbour);
-let kelp = have(await player(), "kelp");
+let held = have(await player(), ware);
 await call("buy_listing", { id: notice.id, qty: 1 }, coinsToYocto(unit));
 await sleep(2600);
 const gained = yoctoToCoins((await near.balance(neighbour)) - theirs);
 p = await player();
 const sale = (await near.view(cfg.contract, "get_board_sales", { limit: 1 }))[0];
 check(
-  have(p, "kelp") === kelp + 1 && gained >= unit && sale?.buyer === me && sale?.seller === neighbour,
-  `bought the neighbour's kelp off the board; the ${unit} coins went straight to them (their purse +${gained.toFixed(1)})`,
+  have(p, ware) === held + 1 && gained >= unit && sale?.buyer === me && sale?.seller === neighbour,
+  `bought the neighbour's ${ware} off the board; the ${unit} coins went straight to them (their purse +${gained.toFixed(1)})`,
 );
 
 // Pin a notice, see the goods leave my bag, take it down again.
-kelp = have(p, "kelp");
-const mine = (await call("list_item", { token_id: "kelp", qty: 1, unit_price: coinsToYocto(999).toString() })).value;
+held = have(p, ware);
+const mine = (await call("list_item", { token_id: ware, qty: 1, unit_price: coinsToYocto(999).toString() })).value;
 p = await player();
-check(have(p, "kelp") === kelp - 1 && p.on_board[TOK.indexOf("kelp")] === 1, "pinned a notice: the kelp waits on the board, not in my bag");
+check(have(p, ware) === held - 1 && p.on_board[TOK.indexOf(ware)] === 1, `pinned a notice: the ${ware} waits on the board, not in my bag`);
 await call("cancel_listing", { id: mine.id });
 p = await player();
-check(have(p, "kelp") === kelp && p.on_board[TOK.indexOf("kelp")] === 0, "took the notice down: the kelp came back");
+check(have(p, ware) === held && p.on_board[TOK.indexOf(ware)] === 0, `took the notice down: the ${ware} came back`);
 
 // Maren reads the board too: ore priced under her bid gets bought from her treasury.
 const oreBid = (await api("/api/market?player=" + me)).history.prices.ore.at(-1);

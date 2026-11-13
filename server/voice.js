@@ -125,6 +125,10 @@ const LINES = {
   no_stock: [(c) => `I'm clean out of ${NAMES[c.token][1]}. Bring me the makings and I'll have one on the shelf soon.`],
   no_goods: [(c) => `You don't have that much ${c.token} on you.`],
   broke: [() => "I'm short of coin today. Buy something first, then I can pay you."],
+  red_tide: [
+    () => "Kelp? In a red tide? It's turned, love, every strand of it. Come back when the water's clear.",
+    () => "Not a strand of kelp while the red tide's in. Nobody will touch it, not even the mainland.",
+  ],
   wont_buy: [(c) => `I don't buy ${NAMES[c.token][1]}. Kelp, driftwood, ore and pearls are what I'm after.`],
   wont_sell: [(c) => `I'm keeping my ${c.token}. Pickaxes, a boat or the beacon lens, that's what's for sale.`],
   cooldown: [() => "Give me a moment to cool off, would you?"],

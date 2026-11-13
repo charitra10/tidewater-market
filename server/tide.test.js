@@ -1,8 +1,8 @@
 // The tide (web/tide.js) and what it does to Maren's offers. Run: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tideAt, tideHeight, nextTide, tideBidFactor, TIDE_PERIOD_MS, PHASES, mix32, stormAt, stormLevel, stormBidFactor, STORM_BLOCK_MS, STORM_MS } from "../web/tide.js";
-import { unitBid, priceBoard, openHaggle, boardPicks, planWork, RAW } from "./merchant.js";
+import { tideAt, tideHeight, nextTide, tideBidFactor, TIDE_PERIOD_MS, PHASES, mix32, stormAt, stormLevel, stormBidFactor, STORM_BLOCK_MS, STORM_MS, eventAt, eventBidFactor, EVENTS, EVENT_BLOCK_MS } from "../web/tide.js";
+import { unitBid, unitAsk, askWhy, priceBoard, openHaggle, boardPicks, planWork, RAW } from "./merchant.js";
 import { writtenLine, TIDE_WHY } from "./voice.js";
 
 const market = (tide, over = {}) => ({
@@ -137,17 +137,68 @@ test("storms come on a public schedule, the same one the contract keeps", () => 
   for (const [ms, active, startMs, endsMs] of [
     [0, false, 720_000, 960_000],
     [1_000_000, false, 3_240_000, 3_480_000],
-    [1_794_543_000_000, true, 1_794_543_000_000, 1_794_543_240_000],
-    [1_794_543_239_999, true, 1_794_543_000_000, 1_794_543_240_000],
+    // a calm hour: the storm due at 1_794_543_000_000 is called off
+    [1_794_543_000_000, false, 1_794_544_800_000, 1_794_545_040_000],
+    [1_794_544_800_000, true, 1_794_544_800_000, 1_794_545_040_000],
+    [1_794_545_039_999, true, 1_794_544_800_000, 1_794_545_040_000],
   ]) {
     assert.deepEqual(stormAt(ms), { active, startMs, endsMs }, `at ${ms} ms`);
   }
-  // one storm in every half hour, four minutes long
+  // one storm in every half hour, four minutes long, except the one a calm calls off
+  let calms = 0;
   for (let block = 1_000_000; block < 1_000_500; block++) {
     const from = block * STORM_BLOCK_MS;
     const s = stormAt(from);
-    assert.ok(s.startMs >= from && s.endsMs < from + STORM_BLOCK_MS && s.endsMs - s.startMs === STORM_MS);
+    const calm = block % 2 === 0 && eventAt(from).kind === "calm";
+    if (calm) {
+      calms++;
+      assert.ok(s.startMs >= from + STORM_BLOCK_MS, "called off: the next storm is in the next half hour");
+    } else assert.ok(s.startMs >= from && s.endsMs < from + STORM_BLOCK_MS && s.endsMs - s.startMs === STORM_MS);
   }
+  assert.ok(calms > 25 && calms < 75, `${calms} calms`);
+});
+
+test("events come on a public schedule, the same one the contract keeps", () => {
+  // the same table as `events_come_on_a_public_schedule` in contract/src/lib.rs
+  for (const [ms, kind, active, startMs, endsMs] of [
+    [0, "fog", false, 600_000, 1_200_000],
+    [1_000_000, "fog", true, 600_000, 1_200_000],
+    [18_000_001, "festival", false, 18_600_000, 19_200_000],
+    [1_794_543_000_000, "calm", true, 1_794_543_000_000, 1_794_543_600_000],
+    [1_794_560_000_000, "fog", false, 1_794_560_400_000, 1_794_561_000_000],
+  ]) {
+    assert.deepEqual(eventAt(ms), { kind, active, startMs, endsMs }, `at ${ms} ms`);
+  }
+  // one every hour, a whole tide long; a calm always holds off a storm that was due
+  for (let hour = 400_000; hour < 400_500; hour++) {
+    const e = eventAt(hour * EVENT_BLOCK_MS);
+    assert.ok(e.startMs >= hour * EVENT_BLOCK_MS && e.endsMs <= (hour + 1) * EVENT_BLOCK_MS && e.endsMs - e.startMs === TIDE_PERIOD_MS);
+    assert.ok(EVENTS.includes(e.kind));
+    for (let ms = e.startMs; ms < e.endsMs; ms += 10_000) if (e.kind === "calm") assert.equal(stormAt(ms).active, false);
+  }
+});
+
+test("a red tide: she won't buy kelp, and nor will the mainland; a festival: lenses dear, pearls wanted", () => {
+  const red = { kind: "red_tide", active: true };
+  const fest = { kind: "festival", active: true };
+  const m = market(undefined, { stock: { kelp: 30 } });
+  assert.equal(eventBidFactor("kelp", red), 0);
+  assert.equal(eventBidFactor("kelp", { ...red, active: false }), 1);
+  assert.equal(unitBid({ ...m, event: red }, "kelp"), 0);
+  assert.ok(unitBid({ ...m, event: red }, "driftwood") > 0);
+  const row = priceBoard({ ...m, event: red }).buys.find((b) => b.token === "kelp");
+  assert.equal(row.price, null, "not buying");
+  assert.match(row.why.steps.find((st) => st.key === "event").note, /Red tide/);
+  const exports = (event) => planWork({ ...m, event }, { kelp: 3.5 }).filter((j) => j.op === "export" && j.token === "kelp");
+  assert.equal(exports(undefined).length, 1);
+  assert.equal(exports(red).length, 0);
+  // the festival: she asks a quarter more for a lens, and pays a tenth more for pearls
+  const shop = market(undefined, { stock: { beacon: 1 } });
+  assert.ok(Math.abs(unitAsk({ ...shop, event: fest }, "beacon") / unitAsk(shop, "beacon") - 1.25) < 1e-9);
+  assert.ok(unitBid({ ...shop, event: fest }, "pearl") > unitBid(shop, "pearl"));
+  assert.match(askWhy({ ...shop, event: fest }, "beacon").steps.find((st) => st.key === "event").note, /festival/);
+  // and it never pushes her bid past the ceiling
+  assert.ok(unitBid({ ...market(undefined, { stock: { pearl: 0, beacon: 0 }, treasury: 5000 }), event: fest, tide: SPRING_HIGH, storm: { active: true } }, "pearl") <= 110);
 });
 
 test("the sky darkens smoothly before a storm and clears after it", () => {
