@@ -7,6 +7,7 @@
 import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "./near-lite.js";
 import { TOKENS, NAMES, BLURB, ICONS } from "./icons.js";
 import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld } from "./world.js";
+import { tideAt, tideHeight, tideBidFactor, nextTide, tideName, TIDE_TEXT, TIDE_PERIOD_MS } from "./tide.js";
 
 const $ = (id) => document.getElementById(id);
 const RESERVE = 10n ** 23n; // 0.1 NEAR kept back for network fees, not shown as coins
@@ -29,7 +30,10 @@ const S = {
   night: false,
   nightAmount: 0,
   market: null,
+  tide: tideAt(Date.now()), // { phase, spring, endsMs, height }, see tide.js
 };
+let clockSkew = 0; // the shop's clock minus ours, so our tide agrees with Maren's
+const nowMs = () => Date.now() + clockSkew;
 
 let cfg, near, key, me, rules;
 let save = null; // { accountId, secret, contract, flags }
@@ -80,12 +84,13 @@ const sfx = {
 };
 
 // ---------- toasts and floating text ----------
-function toast(text, bad = false) {
+function toast(text, bad = false, ms = 3500) {
   const el = document.createElement("div");
   el.className = "toast" + (bad ? " bad" : "");
   el.textContent = text;
+  if (ms !== 3500) el.style.animationDuration = `${(ms - 100) / 1000}s`;
   $("toasts").append(el);
-  setTimeout(() => el.remove(), 3500);
+  setTimeout(() => el.remove(), ms);
   if (bad) sfx.bad();
 }
 function float(text, icon, opts = {}) {
@@ -166,6 +171,80 @@ setInterval(() => {
     showTick(false);
   } else $("ticker-when").textContent = ago(ticker.items[ticker.i].at);
 }, 1000);
+
+// ---------- the tide (it turns every 10 minutes; see tide.js) ----------
+const mmss = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
+const TIDE_NEXT = { low: "turns in", rising: "high in", high: "turns in", falling: "low in" };
+const TIDE_NEWS = {
+  low: "The tide is out. The rock pools are full of kelp, and the reef is shallow: pearls are easy.",
+  springlow: "Spring tide! The lowest water in half an hour: kelp everywhere, and the reef half out of the sea.",
+  high: "High tide. Driftwood is washing up the beach; the pools and the reef are under water.",
+  springhigh: "Spring high tide! Driftwood all along the beach, and the reef deeper than ever.",
+};
+let lastTide = null;
+
+/// A little chart of the water: two minutes back, ten ahead.
+function tideChart(now) {
+  const w = 238, h = 38, from = now - 2 * 60_000, span = 12 * 60_000;
+  const x = (ms) => ((ms - from) / span) * w;
+  const y = (lvl) => h / 2 - lvl * 12.5;
+  let line = "";
+  for (let i = 0; i <= 96; i++) {
+    const ms = from + (span * i) / 96;
+    line += `${i ? "L" : "M"}${x(ms).toFixed(1)} ${y(tideHeight(ms)).toFixed(1)}`;
+  }
+  let labels = "";
+  for (let c = Math.floor(from / TIDE_PERIOD_MS); c * TIDE_PERIOD_MS <= from + span; c++) {
+    for (const [off, phase] of [[TIDE_PERIOD_MS / 8, "low"], [(TIDE_PERIOD_MS * 5) / 8, "high"]]) {
+      const ms = c * TIDE_PERIOD_MS + off;
+      const lx = x(ms);
+      if (lx < 22 || lx > w - 22 || Math.abs(lx - x(now)) < 30) continue; // (the title names the tide you are in)
+      const lvl = tideHeight(ms);
+      const text = tideAt(ms).spring ? `spring ${phase}` : phase;
+      labels += `<text x="${lx.toFixed(1)}" y="${(phase === "low" ? y(lvl) - 4 : y(lvl) + 11).toFixed(1)}" text-anchor="middle" font-size="8.5" fill="#6b6357">${text}</text>`;
+    }
+  }
+  const nx = x(now).toFixed(1);
+  return `<path d="${line}L${w} ${h}L0 ${h}Z" fill="rgba(49,147,161,.3)"/><path d="${line}" fill="none" stroke="#2a8191" stroke-width="1.6"/>${labels}` +
+    `<line x1="${nx}" x2="${nx}" y1="0" y2="${h}" stroke="#b8432f" stroke-width="1" stroke-dasharray="2 2"/><circle cx="${nx}" cy="${y(tideHeight(now)).toFixed(1)}" r="3.2" fill="#b8432f" stroke="#fff" stroke-width="1.2"/>`;
+}
+
+const WAVES = `<path d="M2 14c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 5 2" fill="none" stroke="#2a8191" stroke-width="2.2" stroke-linecap="round"/><path d="M2 19c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 5 2" fill="none" stroke="#7cc2c8" stroke-width="2.2" stroke-linecap="round"/>`;
+const TIDE_ARROW = { rising: `<path d="M12 9V2m-3 3 3-3 3 3" fill="none" stroke="#b8432f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`, falling: `<path d="M12 2v7m-3-3 3 3 3-3" fill="none" stroke="#b8432f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>` };
+
+function renderTide() {
+  const now = nowMs();
+  const t = tideAt(now);
+  S.tide = t;
+  const card = $("tide");
+  $("tide-icon").innerHTML = `<svg viewBox="0 0 24 24">${WAVES}${TIDE_ARROW[t.phase] ?? ""}</svg>`;
+  $("tide-name").textContent = TIDE_TEXT[t.phase].name; // (a "spring" badge is added by CSS)
+  card.classList.toggle("spring", t.spring && (t.phase === "low" || t.phase === "high"));
+  $("tide-when").textContent = `${TIDE_NEXT[t.phase]} ${mmss(t.endsMs - now)}`;
+  let what = TIDE_TEXT[t.phase].what;
+  if (t.phase === "falling" && tideAt(nextTide(now, "low")).spring) what = "Spring low tide next: kelp everywhere, the reef half out of the sea";
+  if (t.phase === "rising" && tideAt(nextTide(now, "high")).spring) what = "Spring high tide next: driftwood all along the beach";
+  $("tide-what").textContent = what;
+  $("tide-price").textContent = TIDE_TEXT[t.phase].price + ".";
+  $("tide-chart").innerHTML = tideChart(now);
+
+  // say so when the water turns (but not for the tide you arrived on)
+  if (lastTide && started && lastTide.phase !== t.phase && (t.phase === "low" || t.phase === "high")) {
+    toast(TIDE_NEWS[(t.spring ? "spring" : "") + t.phase], false, 7000); // longer news, longer toast
+    card.classList.remove("turn");
+    void card.offsetWidth;
+    card.classList.add("turn");
+    if (S.shopOpen) renderShop(); // her offers just moved
+  }
+  lastTide = t;
+}
+
+/// For the stall: how the tide is moving her offer for a raw good.
+function tideNote(token) {
+  const f = tideBidFactor(token, S.tide);
+  if (f === 1) return "";
+  return ` <span class="tide-note ${f > 1 ? "up" : "down"}">${tideName(S.tide)}: she pays ${f > 1 ? "more" : "less"}</span>`;
+}
 
 const clock = (ms) => `${Math.floor(ms / 60000)}m ${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}s`;
 const keeperRows = (list) =>
@@ -271,6 +350,7 @@ function refresh(fresh = false) {
       const settling = performance.now() - lastTxAt < 2500;
       if (bal > 0n && !settling) coins = Math.max(0, Math.floor(yoctoToCoins(bal > RESERVE ? bal - RESERVE : 0n)));
       else setTimeout(refresh, settling ? 2600 : 1500); // (a brand-new account can also take a moment to show up)
+      if (market && market !== S.market && market.now) clockSkew = market.now - Date.now();
       S.market = market;
       S.board = (market?.notices?.listings ?? []).filter((l) => l.expiresMs > Date.now());
       tellSellerNews();
@@ -295,7 +375,10 @@ function buildHud() {
   $("pips").innerHTML = "<i></i>".repeat(rules.energy_max);
   $("pips").style.gridTemplateColumns = `repeat(${rules.energy_max}, 9px)`;
   $("inv").innerHTML = SLOTS.map((t) => `<div class="slot empty" id="slot-${t}" title="${NAMES[t]}">${ICONS[t]}<b>0</b></div>`).join("");
-  for (const id of ["purse", "inv", "goal", "help", "ledger-btn"]) $(id).hidden = false;
+  for (const id of ["purse", "inv", "goal", "help", "ledger-btn", "tide"]) $(id).hidden = false;
+  renderTide();
+  setInterval(renderTide, 1000);
+  $("tide").addEventListener("click", () => ($("tide-table").hidden = !$("tide-table").hidden));
 }
 function bump(token) {
   const el = $("slot-" + token);
@@ -500,7 +583,7 @@ function renderShop() {
     for (const b of m.board.buys) {
       const have = pv.items[idx(b.token)];
       const qty = Math.max(1, Math.min(have, sellQty[b.token] ?? have));
-      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${b.price} each.</div></div>
+      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${b.price} each.${tideNote(b.token)}</div></div>
         <div class="buy">${
           have > 0
             ? `<span class="qty"><button data-qty-token="${b.token}" data-d="-1">−</button>${qty}<button data-qty-token="${b.token}" data-d="1">+</button></span><button class="btn small" data-open="buy" data-token="${b.token}" data-qty="${qty}">Sell</button>`
@@ -962,6 +1045,7 @@ function frame(now) {
   last = now;
   const t = now / 1000;
   const p = S.player;
+  S.tide.height = tideHeight(nowMs());
 
   if (started && !busy && !S.shopOpen && !S.boardOpen) {
     let dx = (keys.has("d") || keys.has("arrowright") ? 1 : 0) - (keys.has("a") || keys.has("arrowleft") ? 1 : 0);

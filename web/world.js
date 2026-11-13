@@ -2,6 +2,7 @@
 // Also knows where you can walk and where the interesting spots are.
 
 import { iconImage } from "./icons.js";
+import { TIDE_TEXT } from "./tide.js";
 
 export const W = 1280;
 export const H = 720;
@@ -104,6 +105,18 @@ while (PEBBLES.length < 60) {
   const x = shoreX(y) + 14 + rand() * 60;
   PEBBLES.push({ x, y, r: 1.5 + rand() * 2.5, shell: rand() < 0.2 });
 }
+// what a low tide uncovers on the wet sand: weed, stones and shells, each
+// `off` px from the shoreline (seaward), so they show as the water drains
+const EXPOSED = [];
+for (let y = 60; y < 710; y += 16 + rand() * 20) {
+  if (y > 528 && y < 592) continue; // under the pier
+  const r = rand();
+  EXPOSED.push({ y, off: -25 + rand() * 14, kind: r < 0.5 ? "weed" : r < 0.82 ? "stone" : "shell", size: 2.6 + rand() * 2.8, turn: rand() * 3 });
+}
+// driftwood the high tide throws up the beach: [y, px from the shoreline, angle]
+const WASHED = [[268, 27, -0.25], [474, 31, 0.45], [636, 22, -0.6]];
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
 const TREES = [
   [612, 96, 1], [700, 62, 0.9], [770, 128, 1.1], [868, 96, 1], [610, 642, 1.1], [716, 676, 0.95],
   [948, 656, 1.05], [1214, 430, 1], [1178, 338, 0.9], [652, 540, 0.85], [1238, 640, 1.1], [905, 560, 0.8],
@@ -117,7 +130,7 @@ const PATHS = [
 ];
 
 // ---------- the pieces ----------
-function drawSea(ctx, t) {
+function drawSea(ctx, t, wx) {
   const g = ctx.createLinearGradient(0, 0, 560, 0);
   g.addColorStop(0, "#1c5b78");
   g.addColorStop(1, "#3193a1");
@@ -127,7 +140,7 @@ function drawSea(ctx, t) {
   for (let i = 0; i < 26; i++) {
     const y = 18 + i * 28 + Math.sin(i * 2.1) * 8;
     const x = ((i * 137 + t * (8 + (i % 4) * 3)) % 620) - 60;
-    if (x > shoreX(y) - 30) continue;
+    if (x > shoreX(y) + wx - 24) continue;
     ctx.strokeStyle = `rgba(220,245,245,${0.1 + 0.1 * Math.sin(t * 0.9 + i)})`;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -138,18 +151,24 @@ function drawSea(ctx, t) {
   }
 }
 
-function drawReef(ctx, t) {
-  // rocks under the water, foam rings, and a buoy
+function drawReef(ctx, t, lvl) {
+  // rocks under the water, foam rings, and a buoy; at low water the rocks stand out
+  const out = clamp01((-lvl - 0.2) / 0.9); // 0 at mid tide, 1 at low water
+  const deep = clamp01(lvl); // 1 at high water
   for (const [x, y, r] of [[120, 470, 30], [170, 500, 22], [96, 520, 18], [150, 440, 16]]) {
-    ellipse(ctx, x, y, r * 1.25, r * 0.8, "rgba(20,60,74,0.55)");
-    ctx.strokeStyle = `rgba(235,250,250,${0.25 + 0.2 * Math.sin(t * 1.4 + x)})`;
+    ellipse(ctx, x, y, r * 1.25, r * 0.8, `rgba(20,60,74,${0.55 - 0.2 * deep})`);
+    ctx.strokeStyle = `rgba(235,250,250,${(0.25 + 0.2 * Math.sin(t * 1.4 + x)) * (1 - 0.5 * deep)})`;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.ellipse(x, y, r * 1.25 + 4 + Math.sin(t + x) * 2, r * 0.8 + 3, 0, 0, Math.PI * 2);
     ctx.stroke();
   }
-  ellipse(ctx, 132, 478, 12, 7, "#5d6f73");
-  ellipse(ctx, 168, 500, 8, 5, "#6c7e82");
+  for (const [x, y, rx, ry, need] of [[132, 478, 12, 7, -1], [168, 500, 8, 5, -1], [104, 520, 9, 5, 0.35], [152, 442, 8, 4.5, 0.55], [118, 458, 6, 3.5, 0.8]]) {
+    const f = need < 0 ? Math.min(1.25, 0.75 + 0.5 * out - 0.55 * deep) : clamp01((out * 1.35 - need) * 2.5);
+    if (f < 0.08) continue;
+    ellipse(ctx, x, y, rx * f, ry * f, "#5d6f73");
+    ellipse(ctx, x - rx * 0.25 * f, y - ry * 0.3 * f, rx * 0.45 * f, ry * 0.35 * f, "rgba(255,255,255,0.16)");
+  }
   const bob = Math.sin(t * 1.7) * 3;
   ctx.save();
   ctx.translate(196, 452 + bob);
@@ -164,17 +183,29 @@ function drawReef(ctx, t) {
   ctx.restore();
 }
 
-function drawLand(ctx, t) {
-  // wet sand, then dry sand
+function drawLand(ctx, t, wx) {
+  // shallows just off the beach
   ctx.beginPath();
-  smooth(ctx, SHORE, -6);
+  smooth(ctx, SHORE, wx - 12);
+  ctx.strokeStyle = "rgba(150,220,215,0.2)";
+  ctx.lineWidth = 22;
+  ctx.stroke();
+  // wet sand from the water's edge (which moves with the tide), then dry sand
+  ctx.beginPath();
+  smooth(ctx, SHORE, wx);
   ctx.lineTo(W + 20, H + 20);
   ctx.lineTo(W + 20, -20);
   ctx.closePath();
   ctx.fillStyle = "#cdb783";
   ctx.fill();
+  for (const e of EXPOSED) if (e.off > wx + 3) drawExposed(ctx, shoreX(e.y) + e.off, e.y, e);
   ctx.beginPath();
-  smooth(ctx, SHORE, 10 + Math.sin(t * 0.8) * 2);
+  smooth(ctx, SHORE, wx + 4);
+  ctx.strokeStyle = "rgba(110,90,50,0.14)"; // damp where the water just was
+  ctx.lineWidth = 7;
+  ctx.stroke();
+  ctx.beginPath();
+  smooth(ctx, SHORE, Math.max(10 + Math.sin(t * 0.8) * 2, wx + 3));
   ctx.lineTo(W + 20, H + 20);
   ctx.lineTo(W + 20, -20);
   ctx.closePath();
@@ -182,12 +213,12 @@ function drawLand(ctx, t) {
   ctx.fill();
   // foam
   ctx.beginPath();
-  smooth(ctx, SHORE, -8 + Math.sin(t * 0.8) * 4);
+  smooth(ctx, SHORE, wx - 2 + Math.sin(t * 0.8) * 4);
   ctx.strokeStyle = "rgba(255,255,255,0.85)";
   ctx.lineWidth = 3.5;
   ctx.stroke();
   ctx.beginPath();
-  smooth(ctx, SHORE, -22 + Math.sin(t * 0.8 + 1.4) * 5);
+  smooth(ctx, SHORE, wx - 16 + Math.sin(t * 0.8 + 1.4) * 5);
   ctx.strokeStyle = "rgba(255,255,255,0.3)";
   ctx.lineWidth = 2;
   ctx.stroke();
@@ -240,6 +271,44 @@ function drawLand(ctx, t) {
       ctx.stroke();
     }
   }
+}
+
+/// A bit of weed, a stone or a shell left on the wet sand by the falling tide.
+function drawExposed(ctx, x, y, e) {
+  if (e.kind === "stone") {
+    ellipse(ctx, x, y, e.size * 1.5, e.size, "#9b9585");
+    ellipse(ctx, x - e.size * 0.4, y - e.size * 0.35, e.size * 0.6, e.size * 0.4, "rgba(255,255,255,0.22)");
+  } else if (e.kind === "shell") {
+    ellipse(ctx, x, y, e.size * 0.9, e.size * 0.7, "#f4e7d4");
+  } else {
+    ctx.strokeStyle = "#3f6d47";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const a = e.turn + i * 0.9;
+      ctx.moveTo(x, y);
+      ctx.quadraticCurveTo(x + Math.cos(a) * e.size * 2, y + Math.sin(a) * e.size, x + Math.cos(a + 0.4) * e.size * 3, y + Math.sin(a + 0.4) * e.size * 1.6);
+    }
+    ctx.stroke();
+  }
+}
+
+/// Driftwood the high tide has thrown up the beach.
+function drawWashedUp(ctx, lvl) {
+  const a = clamp01((lvl - 0.35) * 2.2);
+  if (!a) return;
+  ctx.globalAlpha = a;
+  for (const [y, off, ang] of WASHED) {
+    ctx.save();
+    ctx.translate(shoreX(y) + off, y);
+    ctx.rotate(ang);
+    rr(ctx, -16, -3.5, 32, 7, 3.5);
+    ctx.fillStyle = "#a9845a";
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
 }
 
 function drawCliffs(ctx, t) {
@@ -356,15 +425,16 @@ export function drawBoat(ctx, x, y, tilt = 0) {
   ctx.restore();
 }
 
-function drawTidePools(ctx, t) {
+function drawTidePools(ctx, t, lvl) {
   for (const [x, y, rx, ry] of [[462, 388, 22, 12], [476, 428, 17, 10], [448, 412, 12, 8]]) {
     ellipse(ctx, x, y, rx + 4, ry + 3, "#b9a474");
     ellipse(ctx, x, y, rx, ry, "#58a9b4");
     ellipse(ctx, x - rx * 0.3, y - ry * 0.3, rx * 0.35, ry * 0.3, "rgba(255,255,255,0.35)");
   }
-  // kelp fronds
+  // kelp fronds: more of them show as the water drains
   ctx.lineCap = "round";
-  for (const [x, y, p] of [[452, 394, 0], [470, 386, 1], [474, 432, 2], [486, 420, 3]]) {
+  const fronds = Math.round(Math.min(8, Math.max(1, 4 - lvl * 4)));
+  for (const [x, y, p] of [[452, 394, 0], [470, 386, 1], [474, 432, 2], [486, 420, 3], [458, 420, 4], [444, 404, 5], [482, 398, 6], [466, 440, 7]].slice(0, fronds)) {
     const sway = Math.sin(t * 1.6 + p) * 3;
     ctx.strokeStyle = p % 2 ? "#3f8f5a" : "#2f7d4f";
     ctx.lineWidth = 3;
@@ -372,6 +442,18 @@ function drawTidePools(ctx, t) {
     ctx.moveTo(x, y);
     ctx.quadraticCurveTo(x - 5 + sway, y - 8, x + sway, y - 15);
     ctx.stroke();
+  }
+  // high water floods them
+  const flood = clamp01((lvl - 0.3) / 0.7);
+  if (flood > 0) {
+    ellipse(ctx, 452, 410, 38, 34, `rgba(70,160,172,${0.6 * flood})`);
+    ctx.strokeStyle = `rgba(235,250,250,${0.45 * flood})`;
+    ctx.lineWidth = 1.5;
+    for (const [x, y, r] of [[462, 396, 9], [476, 424, 7]]) {
+      ctx.beginPath();
+      ctx.ellipse(x, y, r + Math.sin(t * 2 + x) * 2, (r + Math.sin(t * 2 + x) * 2) * 0.5, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
   // driftwood
   ctx.save();
@@ -760,12 +842,15 @@ function pill(ctx, x, y, text, sub) {
 /// Draw one frame. `S` is the game state (see game.js).
 export function drawWorld(ctx, t, S) {
   ctx.clearRect(0, 0, W, H);
-  drawSea(ctx, t);
-  drawReef(ctx, t);
-  drawLand(ctx, t);
+  const lvl = S.tide?.height ?? 0; // -1 low water .. 1 high water (spring tides go further)
+  const wx = -8 + 14 * lvl; // where the water's edge sits, from the shoreline
+  drawSea(ctx, t, wx);
+  drawReef(ctx, t, lvl);
+  drawLand(ctx, t, wx);
+  drawWashedUp(ctx, lvl);
   drawCliffs(ctx, t);
   drawPier(ctx, t, S.hasBoat && !S.atSea);
-  drawTidePools(ctx, t);
+  drawTidePools(ctx, t, lvl);
 
   // spots you can use, with a soft ring
   for (const h of HOTSPOTS) {
@@ -846,6 +931,9 @@ export function drawWorld(ctx, t, S) {
     ctx.fillText(S.busyText + dots, px - w / 2 + 12, py + 1);
   } else if (S.near && !S.shopOpen && !S.boardOpen) {
     const h = HOTSPOTS.find((s) => s.id === S.near);
-    pill(ctx, h.x, h.y - (h.pillUp ?? 62), h.verb, h.cost ? `${h.cost} energy` : "");
+    let sub = h.cost ? `${h.cost} energy` : "";
+    const tidal = (h.id === "shore" || h.id === "reef") && S.tide ? TIDE_TEXT[S.tide.phase][h.id] : "";
+    if (tidal) sub += ` · ${tidal}`;
+    pill(ctx, h.x, h.y - (h.pillUp ?? 62), h.verb, sub);
   }
 }
