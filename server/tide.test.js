@@ -1,8 +1,8 @@
 // The tide (web/tide.js) and what it does to Maren's offers. Run: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tideAt, tideHeight, nextTide, tideBidFactor, TIDE_PERIOD_MS, PHASES } from "../web/tide.js";
-import { unitBid, priceBoard, openHaggle, boardPicks, RAW } from "./merchant.js";
+import { tideAt, tideHeight, nextTide, tideBidFactor, TIDE_PERIOD_MS, PHASES, mix32, stormAt, stormLevel, stormBidFactor, STORM_BLOCK_MS, STORM_MS } from "../web/tide.js";
+import { unitBid, priceBoard, openHaggle, boardPicks, planWork, RAW } from "./merchant.js";
 import { writtenLine, TIDE_WHY } from "./voice.js";
 
 const market = (tide, over = {}) => ({
@@ -123,6 +123,74 @@ test("Maren says why the tide moved her offer, and names her price", () => {
       const line = writtenLine(kind, { token, qty: 2, price: 7, why: TIDE_WHY[phase][token] }, () => r);
       assert.match(line, /\b7 coins\b/);
       assert.ok(line.includes(TIDE_WHY[phase][token]), line);
+    }
+  }
+});
+
+// ---------------- storms ----------------
+
+test("storms come on a public schedule, the same one the contract keeps", () => {
+  // the same tables as `storms_come_on_a_public_schedule` in contract/src/lib.rs
+  for (const [x, h] of [[0, 2_462_723_854], [1, 920_564_995], [996_968, 2_497_128_548], [4_294_967_295, 996_586_154]]) {
+    assert.equal(mix32(x), h, `mix32(${x})`);
+  }
+  for (const [ms, active, startMs, endsMs] of [
+    [0, false, 720_000, 960_000],
+    [1_000_000, false, 3_240_000, 3_480_000],
+    [1_794_543_000_000, true, 1_794_543_000_000, 1_794_543_240_000],
+    [1_794_543_239_999, true, 1_794_543_000_000, 1_794_543_240_000],
+  ]) {
+    assert.deepEqual(stormAt(ms), { active, startMs, endsMs }, `at ${ms} ms`);
+  }
+  // one storm in every half hour, four minutes long
+  for (let block = 1_000_000; block < 1_000_500; block++) {
+    const from = block * STORM_BLOCK_MS;
+    const s = stormAt(from);
+    assert.ok(s.startMs >= from && s.endsMs < from + STORM_BLOCK_MS && s.endsMs - s.startMs === STORM_MS);
+  }
+});
+
+test("the sky darkens smoothly before a storm and clears after it", () => {
+  const s = stormAt(1_794_543_000_000);
+  assert.equal(stormLevel(s.startMs - 90_000), 0);
+  assert.equal(stormLevel(s.startMs + 1000), 1);
+  assert.equal(stormLevel(s.endsMs - 1000), 1);
+  assert.equal(stormLevel(s.endsMs + 90_000), 0);
+  let last = 0;
+  for (let ms = s.startMs - 120_000; ms < s.endsMs + 120_000; ms += 1000) {
+    const l = stormLevel(ms);
+    assert.ok(Math.abs(l - last) <= 1 / 60 + 1e-9, `no jumps (at ${ms})`);
+    last = l;
+  }
+});
+
+test("in a storm she pays more for pearls and less for driftwood, and ships nothing", () => {
+  const calm = { active: false };
+  const storm = { active: true };
+  const at = (st) => ({ ...market(undefined), storm: st });
+  assert.ok(unitBid(at(storm), "pearl") > unitBid(at(calm), "pearl"));
+  assert.ok(unitBid(at(storm), "driftwood") < unitBid(at(calm), "driftwood"));
+  for (const t of ["kelp", "ore"]) assert.equal(unitBid(at(storm), t), unitBid(at(calm), t));
+  assert.equal(stormBidFactor("pearl", undefined), 1);
+  // a shelf full of kelp: exported when calm, kept in a storm (but she still crafts)
+  const full = { ...market(undefined, { stock: { kelp: 40, rope: 0 } }) };
+  const exports = (m) => planWork(m, { kelp: 3, driftwood: 4, ore: 20, pearl: 55 }).filter((j) => j.op === "export");
+  assert.ok(exports({ ...full, storm: calm }).length > 0);
+  assert.equal(exports({ ...full, storm }).length, 0);
+  assert.ok(planWork({ ...full, storm }).some((j) => j.op === "craft"));
+  // and never past her ceiling
+  for (let stock = 0; stock < 30; stock++) {
+    const m = { ...market({ phase: "high", spring: true }, { stock: { pearl: stock, boat: 0, beacon: 0 } }), storm };
+    assert.ok(unitBid(m, "pearl") <= m.ceiling.pearl);
+  }
+});
+
+test("Maren blames the storm, and names her price", () => {
+  for (const [kind, token] of [["open_buy_tide_dear", "pearl"], ["open_buy_tide_cheap", "driftwood"]]) {
+    for (const r of [0, 0.99]) {
+      const line = writtenLine(kind, { token, qty: 1, price: 9, why: TIDE_WHY.storm[token] }, () => r);
+      assert.match(line, /\b9 coins\b/);
+      assert.ok(line.includes(TIDE_WHY.storm[token]), line);
     }
   }
 });

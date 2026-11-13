@@ -4,7 +4,7 @@
 //
 // All prices here are whole "coins" (1 coin = 0.001 NEAR).
 
-import { tideBidFactor } from "../web/tide.js";
+import { tideBidFactor, stormBidFactor } from "../web/tide.js";
 
 export const TOKENS = ["kelp", "driftwood", "ore", "pearl", "rope", "pickaxe", "boat", "beacon"];
 export const RAW = ["kelp", "driftwood", "ore", "pearl"]; // she buys these
@@ -27,7 +27,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /// `market`: { stock: {token: n}, avgCost: {token: coins}, treasury: coins,
 ///             floor: {token: coins}, ceiling: {token: coins},
-///             tide?: { phase, spring } (see web/tide.js) }
+///             tide?: { phase, spring }, storm?: { active } (see web/tide.js) }
 
 /// Her asking price for ONE unit when `stock` of it are left on the shelf.
 export function unitAsk(market, token, stock = market.stock[token]) {
@@ -53,8 +53,9 @@ export function unitBid(market, token, stock = market.stock[token]) {
   let need = clamp(1 + (0.5 * (target - stock)) / target, 0.55, 1.5);
   if (neededForCrafting({ ...market, stock: { ...market.stock, [token]: stock } }, token)) need *= 1.15;
   const cash = clamp(market.treasury / COMFORTABLE, 0.35, 1);
-  // everyone brings kelp in at low tide, nobody at high tide
-  const price = VALUE[token] * 0.62 * need * cash * tideBidFactor(token, market.tide);
+  // everyone brings kelp in at low tide, nobody at high tide; nobody brings pearls in a storm
+  const weather = tideBidFactor(token, market.tide) * stormBidFactor(token, market.storm);
+  const price = VALUE[token] * 0.62 * need * cash * weather;
   return Math.min(price, market.ceiling[token] ?? Infinity);
 }
 
@@ -92,7 +93,9 @@ export function planWork(market, exportPrice = {}) {
       else jobs.push({ op: "craft", token: out, qty: 1 });
     }
   }
-  // ship what is piling up, a few at a time (the boat to the mainland is small)
+  // ship what is piling up, a few at a time (the boat to the mainland is small;
+  // it stays in harbour in a storm, and the contract would refuse it anyway)
+  if (market.storm?.active) return jobs;
   for (const token of RAW) {
     const surplus = stock[token] - Math.ceil(TARGET[token] * 1.5);
     // ... but never at a loss: goods she overpaid for stay on the shelf (and push

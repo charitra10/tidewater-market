@@ -143,6 +143,10 @@ export const TIDE_WHY = {
     pearl: "The reef's deep at high tide, so a pearl is worth something",
     driftwood: "High tide's throwing driftwood up all along the beach",
   },
+  storm: {
+    pearl: "There's a storm on and nobody can row out to the reef, so a pearl is worth its weight today",
+    driftwood: "The storm's thrown half a forest up the beach",
+  },
 };
 
 function cap(s) {
