@@ -113,6 +113,15 @@ When you are done, your boat and pickaxe can go on the board for the next newcom
 
 The card counts down to the next storm. The goals never stand between a player and the lighthouse, so nobody has to wait half an hour to finish the game. They are kept in the browser, like the rest of the goal list.
 
+## Money between players and merchants
+
+A loop at the session scale, beside the arc. All of it is in the contract ([`lib.rs`](../contract/src/lib.rs)), and the numbers the stall shows are checked against it by a test.
+
+- **Invest, then collect.** A merchant whose treasury falls below 150 coins shuts the stall, and every deal of theirs is refused. Anyone can invest 20 to 500 coins for an IOU worth 120%; at 400 coins the shop reopens. From then on 30% of the merchant's margin on every sale pays the IOUs, oldest first. How soon a stake comes back depends on how much she trades and how much she makes on each sale. You can invest in an open shop too; you are then repaid sooner, since nobody is waiting for it to reopen.
+- **Borrow, then pay off.** A pickaxe on loan costs 66 coins (its 60 ceiling plus 10%) within two hours, against 60 now. Half of every sale goes to the loan, so a new player with 29 coins can reach the cliffs at once and pay for the pickaxe out of the ore it digs: about 130 coins of sales, or pay the rest in coins.
+- **Cover, then the storm.** 15 coins buys 45 (as credit to collect) if your pickaxe breaks on the cliffs in the next storm. A pickaxe breaks on 12% of cliff runs, and 25% in a storm, so cover is worth it if you plan two or more cliff runs while it blows (a 44% chance of a break).
+- **Your name** decides the rest: trades, stakes and repaid loans raise it; refused tricks, insults and defaults lower it. Below zero, Maren won't lend.
+
 ## What the market does between your trips
 
 The market keeps moving whether or not you are at the stall:
@@ -130,11 +139,5 @@ The market keeps moving whether or not you are at the stall:
 
 These are on the plan and are **not** in the game today:
 
-- **Broke merchants close, and players invest:**
-  - a merchant whose treasury runs too low shuts the stall;
-  - players lend it money to reopen;
-  - it pays them back out of its profits.
-
-  That would add a new loop at the session scale: invest, then collect.
 - **Fast-forward:** a simulation of a week of trading in a minute, using the same pricing code, so you can watch the economy move.
 - **Sign in with Google**, so your stall follows you to another device.
