@@ -8,6 +8,8 @@ Maren is not a menu. She is a separate NEAR account with a real treasury. She pa
 
 Players also trade with each other. The notice board by the cottage is a market the players run themselves: pin your goods at your own price, and the buyer's NEAR goes straight to you. Maren reads the board too, and buys whatever is priced under what she would pay.
 
+And the sea moves. The tide turns every ten minutes: low water uncovers the rock pools and the reef, high water throws driftwood up the beach, and Maren's offers swing with it. Gather when the tide gives; sell when it takes.
+
 ![Haggling with Maren at her stall](docs/stall.jpg)
 
 Built at **NEAR Hackathon 2026** for the **Games With Real Economies** track (also fits **Agent Economy**). Runs on NEAR **testnet**.
@@ -29,12 +31,13 @@ Then visit **http://localhost:8787** and press **Step ashore**. There is nothing
 - **Use** what is nearby with `E` (or click it): the tide pools, the cliffs, the pier, Maren's stall, the lighthouse.
 - At the stall, pick something to buy or sell, then **make an offer**, **take her price**, **walk away**, or just **type to her**.
 - At the **notice board** (by the cottage), buy what other players are selling, or pin your own goods at your own price.
+- The **tide clock** (under your bag) shows the tide, what it does and what is coming. Click it for the tide table.
 - The **Ledger** button (bottom right) shows what happened on-chain, for the curious.
 
 To watch the whole loop without a browser, a bot can play it for you. It uses the same signing code as the game:
 
 ```bash
-node scripts/play.mjs          # ~2 min: forage, haggle, sell, try to trick Maren, buy a pickaxe, mine, trade on the notice board
+node scripts/play.mjs          # ~2 min: forage, haggle, sell, check the tide, try to trick Maren, buy a pickaxe, mine, trade on the notice board
 node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the beacon and the lighthouse
 ```
 
@@ -53,8 +56,8 @@ node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the b
                         surplus goes to "the mainland"
 ```
 
-1. **Forage.** Each trip costs energy, which refills over time. The shore is free. The cliffs need a pickaxe (which can break). The reef needs a boat.
-2. **Sell.** Maren buys kelp, driftwood, ore and pearls. The more of something she already holds, the less she pays. If she needs it to build something she has run out of, she pays more.
+1. **Forage.** Each trip costs energy, which refills over time. The shore is free. The cliffs need a pickaxe (which can break). The reef needs a boat. What you find depends on the tide (below).
+2. **Sell.** Maren buys kelp, driftwood, ore and pearls. The more of something she already holds, the less she pays. If she needs it to build something she has run out of, she pays more. What the tide is bringing in by the armful, she pays less for.
 3. **Buy.** She sells pickaxes, a boat and the beacon lens, but only if she has them. Everything on her shelf is crafted from what players sold her: 3 kelp make a rope; 2 driftwood and a rope make a pickaxe; a boat takes driftwood, rope and ore; the beacon takes pearls, ore and rope. If the boat is sold out, the stall shows what she is missing, and bringing it to her is how the boat gets built.
 4. **Trade with other players** on the notice board. A spare pickaxe, a boat you no longer need, ore at a better price than Maren pays: pin it, and whoever buys it pays you directly. Maren doesn't buy tools back at her stall, so the board is the only place to sell a used one.
 5. **Light the lighthouse** with the beacon lens. Your time goes on the keepers' board. Your boat and pickaxe can then go on the board for the next newcomer.
@@ -68,6 +71,15 @@ node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the b
 - **Players share one market.** If someone floods her with kelp, kelp is worth less for everyone until her workshop and the mainland boat clear it. You can watch it happen: a ticker under your purse shows what other players just bought, sold or tried on Maren (read from the contract's trade log, nothing made up), and every item at the stall has a small line of how its price moved over the last few minutes. The title screen shows the keepers' board.
 - **Players have a market of their own.** On the notice board, pinned goods wait in the contract (escrow) and the buyer's NEAR goes straight to the seller, in the same transaction. Partial buys work, notices last a day, and taking one down returns the goods. When Maren is sold out of boats, the stall points you to anyone selling one on the board.
 - **Maren trades on the board too.** Between customers she buys raw goods priced at or under her own bid (her bid drops with each unit, so she may take only part of a big lot), and used tools only while she is short of them and for at most 55% of their everyday value, so buying from her and selling back cannot turn a profit (a unit test checks this at every stock level). She leaves fresh notices alone for a while so players get first pick ([`boardPicks`](server/merchant.js)).
+- **The tide moves supply and prices, for reasons you can see.** The contract works the tide out from the block clock (`tide_at` in [`lib.rs`](contract/src/lib.rs)): one tide every 10 minutes, in four parts, and every third one a spring tide. Nobody sets it and it needs no state; the game runs the same formula ([`web/tide.js`](web/tide.js)) to draw the water and the tide clock.
+
+  | | Shore | Reef | Maren pays |
+  |---|---|---|---|
+  | Low tide | 2–4 kelp, 0–1 driftwood | 1–2 pearls | less for kelp (×0.8) and pearls (×0.85), more for driftwood (×1.2) |
+  | High tide | 1–2 kelp, 1–3 driftwood | 0–1 pearls | more for kelp and pearls, less for driftwood |
+  | In between | 1–3 kelp, 0–2 driftwood | 0–2 pearls | her ordinary offer |
+
+  Spring tides push all of it further (up to 3–5 kelp, or a reef with almost nothing). Over a whole tide her offers average out to the ordinary price, so the tide rewards timing, not waiting: gather at low water, hold, sell kelp when the water is high. The cliffs stand above the tide. You can see it in the price lines at the stall, which rise and fall with the water, and Maren says so when she haggles.
 - **She runs her business between customers.** A workshop loop crafts what is missing and ships surplus raw goods to "the mainland" at fixed export prices. That export fund is filled by the contract owner and is the one place new NEAR enters the game.
 - **Items are yours.** They are multi-token balances in the contract (NEP-245 core views, `mt_transfer` and events). You can give them to another player.
 
@@ -104,8 +116,8 @@ Her lines are written sentences picked at random ([`server/voice.js`](server/voi
 | `contract/` | The market contract (Rust, near-sdk): items, energy, foraging, quotes, guard rails, crafting, exports, the notice board, the keepers' board. Prebuilt wasm in `contract/res/`. |
 | `server/server.js` | Runs Maren (haggling, posting her quotes with her key, the workshop), creates guest accounts, serves the game. Passes on the contract's trade log and keepers' board, and remembers recent prices for the price lines. |
 | `server/merchant.js` | Her pricing, her bargaining and what she buys off the notice board, as pure functions. |
-| `web/` | The game: `game.js` (logic), `world.js` (the village, drawn in code), `near-lite.js` (transaction signing in ~350 lines, shared with the server and the bot). |
-| `scripts/` | `bootstrap.sh` (set up your own market), `play.mjs` (the bot), `test.sh`, `build.sh`. |
+| `web/` | The game: `game.js` (logic), `world.js` (the village, drawn in code), `tide.js` (the tide clock, shared with the server), `near-lite.js` (transaction signing in ~350 lines, shared with the server and the bot). |
+| `scripts/` | `bootstrap.sh` (set up your own market), `upgrade.sh` (deploy a new contract to an existing market, keeping its state), `play.mjs` (the bot), `test.sh`, `build.sh`. |
 
 ## Tests
 
@@ -113,9 +125,9 @@ Her lines are written sentences picked at random ([`server/voice.js`](server/voi
 ./scripts/test.sh     # needs Rust
 ```
 
-- **42 contract unit tests**: energy, foraging, both directions of trade, every guard rail, crafting cost, exports, the keepers' board, item transfers; and for the notice board: escrow, buying all or part of a notice (the seller is paid, the buyer gets the change), taking a notice down, expiry, the per-player and board limits, Maren buying from her treasury under the same guard rails, and that every item is always in a bag, on a shelf or on the board. Two more upgrade the live contract's real saved state (`contract/tests/fixtures/v1_state.bin`) and check nothing is lost.
-- **28 tests of Maren's pricing, bargaining and board buying** (`cd server && node --test`, no Rust needed), including that no tool can be bought from her and sold back to her at a profit.
-- **The bot** (`scripts/play.mjs`) is the end-to-end test: real transactions on testnet through the same code the browser runs.
+- **44 contract unit tests**: energy, the tide clock and what each tide yields at the shore and the reef, both directions of trade, every guard rail, crafting cost, exports, the keepers' board, item transfers; and for the notice board: escrow, buying all or part of a notice (the seller is paid, the buyer gets the change), taking a notice down, expiry, the per-player and board limits, Maren buying from her treasury under the same guard rails, and that every item is always in a bag, on a shelf or on the board. Two more upgrade the live contract's real saved state (`contract/tests/fixtures/v1_state.bin`) and check nothing is lost.
+- **38 server tests** (`cd server && node --test`, no Rust needed): Maren's pricing, bargaining, board buying and the tide, including that no tool can be bought from her and sold back to her at a profit, that the browser's tide clock matches the contract's (the same table of times is checked on both sides), and that the tide never pushes her past her on-chain price ceiling. Two more run the RPC client against fake servers: one that never answers is skipped, and a transaction that gets no answer is looked up by its hash, never sent twice.
+- **The bot** (`scripts/play.mjs`) is the end-to-end test: real transactions on testnet through the same code the browser runs. It also checks every shore trip against the tide the contract reports, and asks the live contract for its tide (`get_tide`) to compare with the game's clock.
 
 ## On-chain
 
@@ -127,9 +139,9 @@ Main contract methods:
 |---|---|
 | Player | `join`, `forage(spot)`, `accept_quote(id)` (payable), `light_beacon`, `mt_transfer`, `mt_batch_transfer`, `list_item(token_id, qty, unit_price)`, `buy_listing(id, qty?)` (payable), `cancel_listing(id)` |
 | Maren's key | `post_quote`, `cancel_quote`, `craft`, `export`, `shop_buy_listing(id, qty)` |
-| The contract account itself | `migrate` (one-time upgrade that added the notice board, run in the same transaction as the new code) |
+| The contract account itself | `migrate` (one-time upgrade that added the notice board, run in the same transaction as the new code; the tide needed no migration) |
 | Owner (1 yoctoNEAR, so a full-access key is needed) | `set_policy`, `freeze`, `unfreeze`, `fund_treasury`, `fund_mainland`, `withdraw_treasury`, `restock`, `set_merchant` |
-| Anyone (views) | `get_market`, `get_policy`, `get_rules`, `get_player`, `get_quote`, `get_trades`, `get_blocked`, `get_keepers`, `get_listings`, `get_board_sales`, `mt_balance_of`, `mt_batch_balance_of`, `mt_supply` |
+| Anyone (views) | `get_market`, `get_policy`, `get_rules`, `get_player`, `get_quote`, `get_trades`, `get_blocked`, `get_keepers`, `get_listings`, `get_board_sales`, `get_tide`, `mt_balance_of`, `mt_batch_balance_of`, `mt_supply` |
 
 ## Limits, honestly
 
@@ -139,9 +151,10 @@ Main contract methods:
 - **Guest accounts are sponsored.** The server pays 0.13 testnet NEAR per new guest and limits how many it creates per hour. A guest's key lives in that browser's storage; clearing it loses the account. There is no wallet or social login yet.
 - **The haggling endpoint does not check who is asking.** Someone could open a haggle in another player's name. They could not take the deal: only the named player's key can accept a quote.
 - **Foraging randomness** comes from the block's random seed. That is fine for kelp, not for anything valuable.
+- **The tide is public and predictable**, by design: anyone can work out the next spring low. The browser's tide clock follows the shop server's clock, and the contract follows the block clock, so right at the turn of the tide they can disagree for a second or two. The contract's tide is the one that counts, and each forage result says which tide it was.
 - **The export fund is a faucet.** When it is empty, Maren stops exporting and prices sag until players buy things. On mainnet it would need a real source of demand.
 - **NEP-245 is partial**: balances, supply, transfers and events only. No approvals and no `mt_transfer_call`.
-- **Public testnet RPC servers rate-limit.** The game spreads its calls over three of them and retries, but a busy moment can make an action take several seconds.
+- **Public testnet RPC servers rate-limit.** The game spreads its calls over three of them, retries, and moves on from a server that has not answered within 10 seconds, but a busy moment can make an action take several seconds.
 - **Contract storage is paid by the contract**, not by players. That is why the notice board is capped: 40 notices at once, 3 per player.
 - **Expired notices are tidied lazily.** A notice expires after a day and can no longer be bought; its goods go back to the seller the next time anyone pins a notice, or at once if the seller takes it down.
 
