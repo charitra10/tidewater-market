@@ -8,7 +8,7 @@ Maren is not a menu. She is a separate NEAR account with a real treasury. She pa
 
 Players also trade with each other. The notice board by the cottage is a market the players run themselves: pin your goods at your own price, and the buyer's NEAR goes straight to you. Maren reads the board too, and buys whatever is priced under what she would pay.
 
-And the sea moves. The tide turns every ten minutes: low water uncovers the rock pools and the reef, high water throws driftwood up the beach, and Maren's offers swing with it. Gather when the tide gives; sell when it takes.
+And the sea moves. The tide turns every ten minutes: low water uncovers the rock pools and the reef, high water throws driftwood up the beach, and Maren's offers swing with it. Gather when the tide gives; sell when it takes. Twice an hour a storm blows in: the reef closes, the shore fills with wrack, and the mainland boat stays in harbour.
 
 ![Haggling with Maren at her stall](docs/stall.jpg)
 
@@ -31,7 +31,7 @@ Then visit **http://localhost:8787** and press **Step ashore**. There is nothing
 - **Use** what is nearby with `E` (or click it): the tide pools, the cliffs, the pier, Maren's stall, the lighthouse.
 - At the stall, pick something to buy or sell, then **make an offer**, **take her price**, **walk away**, or just **type to her**.
 - At the **notice board** (by the cottage), buy what other players are selling, or pin your own goods at your own price.
-- The **tide clock** (under your bag) shows the tide, what it does and what is coming. Click it for the tide table.
+- The **tide clock** (under your bag) shows the tide, what it does, what is coming and when the next storm is due. Click it for the tide table.
 - The **Ledger** button (bottom right) shows what happened on-chain, for the curious.
 
 To watch the whole loop without a browser, a bot can play it for you. It uses the same signing code as the game:
@@ -80,6 +80,7 @@ node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the b
   | In between | 1–3 kelp, 0–2 driftwood | 0–2 pearls | her ordinary offer |
 
   Spring tides push all of it further (up to 3–5 kelp, or a reef with almost nothing). Over a whole tide her offers average out to the ordinary price, so the tide rewards timing, not waiting: gather at low water, hold, sell kelp when the water is high. The cliffs stand above the tide. You can see it in the price lines at the stall, which rise and fall with the water, and Maren says so when she haggles.
+- **Storms are supply shocks.** Exactly one storm blows in every half hour, for 4 minutes, at a time picked by a public hash of the clock (`storm_at` in the contract, `stormAt` in the game), so anyone can forecast it, and the tide card does. While it blows, the contract refuses trips to the reef (too rough to row), the shore gives 2–5 driftwood and now and then a pearl torn off the reef, pickaxes break on the wet cliffs twice as often (25%), and Maren's exports are refused: the mainland boat stays in harbour. So no new pearls come in and nothing goes out. Maren pays 25% more for pearls and 25% less for driftwood until it passes, and says why. Whoever kept pearls back sells high; whoever is caught at the reef waits.
 - **She runs her business between customers.** A workshop loop crafts what is missing and ships surplus raw goods to "the mainland" at fixed export prices. That export fund is filled by the contract owner and is the one place new NEAR enters the game.
 - **Items are yours.** They are multi-token balances in the contract (NEP-245 core views, `mt_transfer` and events). You can give them to another player.
 
@@ -125,8 +126,8 @@ Her lines are written sentences picked at random ([`server/voice.js`](server/voi
 ./scripts/test.sh     # needs Rust
 ```
 
-- **44 contract unit tests**: energy, the tide clock and what each tide yields at the shore and the reef, both directions of trade, every guard rail, crafting cost, exports, the keepers' board, item transfers; and for the notice board: escrow, buying all or part of a notice (the seller is paid, the buyer gets the change), taking a notice down, expiry, the per-player and board limits, Maren buying from her treasury under the same guard rails, and that every item is always in a bag, on a shelf or on the board. Two more upgrade the live contract's real saved state (`contract/tests/fixtures/v1_state.bin`) and check nothing is lost.
-- **38 server tests** (`cd server && node --test`, no Rust needed): Maren's pricing, bargaining, board buying and the tide, including that no tool can be bought from her and sold back to her at a profit, that the browser's tide clock matches the contract's (the same table of times is checked on both sides), and that the tide never pushes her past her on-chain price ceiling. Two more run the RPC client against fake servers: one that never answers is skipped, and a transaction that gets no answer is looked up by its hash, never sent twice.
+- **50 contract unit tests**: energy, the tide clock and what each tide yields at the shore and the reef, storms (the schedule, the closed reef, the wrack, the wet rock, the boat kept in harbour), both directions of trade, every guard rail, crafting cost, exports, the keepers' board, item transfers; and for the notice board: escrow, buying all or part of a notice (the seller is paid, the buyer gets the change), taking a notice down, expiry, the per-player and board limits, Maren buying from her treasury under the same guard rails, and that every item is always in a bag, on a shelf or on the board. Two more upgrade the live contract's real saved state (`contract/tests/fixtures/v1_state.bin`) and check nothing is lost.
+- **42 server tests** (`cd server && node --test`, no Rust needed): Maren's pricing, bargaining, board buying, the tide and storms, including that no tool can be bought from her and sold back to her at a profit, that the browser's tide clock and storm forecast match the contract's (the same tables are checked on both sides), and that the tide never pushes her past her on-chain price ceiling. Two more run the RPC client against fake servers: one that never answers is skipped, and a transaction that gets no answer is looked up by its hash, never sent twice.
 - **The bot** (`scripts/play.mjs`) is the end-to-end test: real transactions on testnet through the same code the browser runs. It also checks every shore trip against the tide the contract reports, and asks the live contract for its tide (`get_tide`) to compare with the game's clock.
 
 ## On-chain
@@ -151,7 +152,7 @@ Main contract methods:
 - **Guest accounts are sponsored.** The server pays 0.13 testnet NEAR per new guest and limits how many it creates per hour. A guest's key lives in that browser's storage; clearing it loses the account. There is no wallet or social login yet.
 - **The haggling endpoint does not check who is asking.** Someone could open a haggle in another player's name. They could not take the deal: only the named player's key can accept a quote.
 - **Foraging randomness** comes from the block's random seed. That is fine for kelp, not for anything valuable.
-- **The tide is public and predictable**, by design: anyone can work out the next spring low. The browser's tide clock follows the shop server's clock, and the contract follows the block clock, so right at the turn of the tide they can disagree for a second or two. The contract's tide is the one that counts, and each forage result says which tide it was.
+- **The tide and the storms are public and predictable**, by design: anyone can work out the next spring low or the next storm. The browser's tide clock follows the shop server's clock, and the contract follows the block clock, so right at the turn of the tide they can disagree for a second or two. The contract's tide is the one that counts, and each forage result says which tide it was.
 - **The export fund is a faucet.** When it is empty, Maren stops exporting and prices sag until players buy things. On mainnet it would need a real source of demand.
 - **NEP-245 is partial**: balances, supply, transfers and events only. No approvals and no `mt_transfer_call`.
 - **Public testnet RPC servers rate-limit.** The game spreads its calls over three of them, retries, and moves on from a server that has not answered within 10 seconds, but a busy moment can make an action take several seconds.

@@ -7,11 +7,14 @@
 //   node scripts/play.mjs          play until the first pickaxe and a cliffs run,
 //                                  then trade on the notice board
 //   node scripts/play.mjs --full   keep going until the lighthouse is lit
+//   --keep                         keep the guest accounts afterwards (by default
+//                                  they are closed and their NEAR goes back to the guest fund)
 import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "../web/near-lite.js";
-import { tideAt, tideName } from "../web/tide.js";
+import { tideAt, tideName, stormAt } from "../web/tide.js";
 
 const BASE = process.env.GAME_URL || "http://localhost:8787";
 const FULL = process.argv.includes("--full");
+const KEEP = process.argv.includes("--keep");
 const TOK = ["kelp", "driftwood", "ore", "pearl", "rope", "pickaxe", "boat", "beacon"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const api = async (path, body) => {
@@ -66,11 +69,12 @@ async function forage(spot, times) {
     const r = (await call("forage", { spot })).value;
     trips.push(r);
     const found = r.found.map((n, i) => (n ? `${n} ${TOK[i]}` : "")).filter(Boolean).join(", ") || "nothing";
-    say("me", `foraged the ${spot} at ${tideName({ phase: r.tide, spring: r.spring }).toLowerCase()}: ${found}${r.tool_broke ? "  (the pickaxe broke!)" : ""}  [energy ${r.energy_left}]`);
+    say("me", `foraged the ${spot} at ${r.storm ? "storm" : tideName({ phase: r.tide, spring: r.spring }).toLowerCase()}: ${found}${r.tool_broke ? "  (the pickaxe broke!)" : ""}  [energy ${r.energy_left}]`);
   }
 }
 /// What the shore may give at each tide: [kelp, driftwood] as [min, max].
-function shoreRange({ tide, spring }) {
+function shoreRange({ tide, spring, storm }) {
+  if (storm) return [[1, 3], [2, 5]]; // storm wrack
   if (tide === "low") return [[spring ? 3 : 2, spring ? 5 : 4], [0, 1]];
   if (tide === "high") return [[1, 2], spring ? [2, 4] : [1, 3]];
   return [[1, 3], [0, 2]];
@@ -133,7 +137,7 @@ check((await player()).trades > 0, "sold goods to the merchant (she paid real te
 // The tide: the contract works it out from the block clock, and so does the game.
 const shore = trips.filter((r) => r.spot === "shore");
 const inRange = (r) => { const [[k0, k1], [d0, d1]] = shoreRange(r); return r.found[0] >= k0 && r.found[0] <= k1 && r.found[1] >= d0 && r.found[1] <= d1; };
-const tides = [...new Set(shore.map((r) => tideName({ phase: r.tide, spring: r.spring }).toLowerCase()))].join(", ");
+const tides = [...new Set(shore.map((r) => (r.storm ? "storm" : tideName({ phase: r.tide, spring: r.spring }).toLowerCase())))].join(", ");
 check(shore.length > 0 && shore.every(inRange), `every shore trip gave what the tide allowed (${shore.length} trips; ${tides})`);
 const tv = await near.view(cfg.contract, "get_tide");
 const ours = tideAt(tv.now_ms);
@@ -226,7 +230,8 @@ if (FULL) {
     const ask = (t) => market.board.sells.find((s) => s.token === t).price;
     if (have(p, "boat") === 0 && ask("boat") && purse >= ask("boat") * 0.92) { await trade("sell", "boat", 1); continue; }
     if (have(p, "boat") > 0 && ask("beacon") && purse >= ask("beacon") * 0.92) { await trade("sell", "beacon", 1); continue; }
-    if (have(p, "boat") > 0) { await waitEnergy(3); await forage("reef", 1); }
+    if (have(p, "boat") > 0 && stormAt(Date.now() + 15_000).active) { console.log("  (a storm: waiting for the reef to calm down)"); await sleep(20_000); }
+    else if (have(p, "boat") > 0) { await waitEnergy(3); await forage("reef", 1); }
     else if (have(p, "pickaxe") > 0) { await waitEnergy(2); await forage("cliffs", 1); }
     else if (ask("pickaxe") && purse >= ask("pickaxe")) { await trade("sell", "pickaxe", 1); continue; }
     else { await waitEnergy(1); await forage("shore", 1); }
@@ -243,4 +248,21 @@ if (FULL) {
 const m = await api("/api/market");
 console.log(`\n▸ Maren's books: treasury ${m.treasury} coins, profit so far ${m.profit} coins`);
 for (const n of m.news) console.log(`  news: ${n.text}`);
+
+// Hand the guest accounts back: close them, and what is left in them goes to
+// the guest fund that paid for them (their items and stats stay in the contract).
+if (!KEEP) {
+  const fund = me.split(".").slice(1).join(".");
+  const before = await near.balance(fund);
+  for (const [who, k] of [[neighbour, nkey], [me, key]]) {
+    try {
+      await near.send(who, k, who, [actions.deleteAccount(fund)]);
+    } catch (e) {
+      console.log(`  (could not close ${who}: ${e.message})`);
+    }
+  }
+  await sleep(2600);
+  const back = Number((await near.balance(fund)) - before) / 1e24;
+  console.log(`\n▸ Closed both guest accounts: ${back.toFixed(3)} NEAR went back to ${fund}`);
+}
 console.log(`\n✅ ${checks} checks passed. Contract: ${cfg.explorer}/address/${cfg.contract}\n`);
