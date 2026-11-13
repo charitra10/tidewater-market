@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tidewater Fast-Forward</title>
+<meta name="description" content="A week of Tidewater Market trading in a minute: a simulation that uses the live merchants' own pricing rules.">
+<style>
+  :root {
+    --paper: #f6ecd4; --paper-2: #efe2c2; --ink: #2c2a26; --ink-2: #6b6357; --line: #d9c9a3;
+    --teal: #1f6f78; --teal-2: #2f8f96; --red: #b8432f; --gold: #d9a441; --green: #3f8f5a; --sea: #12303c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--sea); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; margin: 0; }
+  button, select, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  [hidden] { display: none !important; }
+  main { max-width: 1240px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--paper); border-radius: 12px; box-shadow: 0 10px 30px rgba(20, 30, 40, .35); padding: 16px 18px; }
+  header.card { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: flex-end; justify-content: space-between; }
+  header h1 { font-size: 26px; }
+  header .tag { color: var(--red); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; font-weight: 700; }
+  header p { margin: 4px 0 0; color: var(--ink-2); max-width: 720px; }
+  header a { color: var(--teal); }
+  .honest { display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 6px; background: #fff3d6; border: 1px solid var(--gold); font-size: 12.5px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-top: 12px; }
+  .controls label { display: flex; gap: 6px; align-items: center; color: var(--ink-2); font-size: 13px; }
+  .controls select, .controls input { background: #fffaf0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+  .controls input { width: 80px; }
+  .btn { background: var(--teal); color: #fff; border: 0; border-radius: 8px; padding: 7px 14px; font-weight: 600; }
+  .btn.plain { background: var(--paper-2); color: var(--ink); border: 1px solid var(--line); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .shocks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .shocks button { background: #fffaf0; border: 1px solid var(--line); border-radius: 16px; padding: 4px 10px; font-size: 12.5px; }
+  .shocks button:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+  .shocks button:disabled { opacity: .5; cursor: default; }
+  .clock { display: flex; gap: 12px; align-items: center; margin-top: 10px; font-variant-numeric: tabular-nums; }
+  .clock b { min-width: 170px; }
+  .bar { flex: 1; height: 6px; background: var(--paper-2); border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--teal-2); }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; margin-top: 14px; }
+  .charts { padding: 10px 12px 12px; }
+  .chart { position: relative; margin-bottom: 10px; }
+  .chart h3 { font: 700 12px/1 system-ui, sans-serif; letter-spacing: 1px; text-transform: uppercase; color: var(--ink-2); margin: 8px 0 4px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+  .chart h3 .key { font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 12px; display: inline-flex; gap: 4px; align-items: center; cursor: pointer; border-radius: 6px; padding: 1px 5px; }
+  .chart h3 .key.on { background: #fffaf0; outline: 1px solid var(--line); }
+  .chart h3 .key i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+  .chart canvas { width: 100%; height: 150px; display: block; background: #fffaf0; border: 1px solid var(--line); border-radius: 6px; cursor: crosshair; }
+  .legend { font-size: 12px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
+  .legend span { display: inline-flex; gap: 5px; align-items: center; }
+  .legend i { width: 12px; height: 10px; display: inline-block; border-radius: 2px; }
+  aside { display: flex; flex-direction: column; gap: 14px; }
+  aside h2 { font-size: 17px; margin-bottom: 6px; }
+  #moment .when { font-weight: 700; }
+  #moment .sub { color: var(--ink-2); font-size: 12.5px; }
+  #moment table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+  #moment td { padding: 2px 0; vertical-align: top; }
+  #moment td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 8px; }
+  #moment tr.sum td { border-top: 1px solid var(--line); font-weight: 700; padding-top: 4px; }
+  #moment tr.lim td { color: var(--red); }
+  #moment .src { font-size: 11.5px; color: var(--ink-2); margin: 6px 0 0; }
+  #story { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow: auto; font-size: 12.5px; }
+  #story li { padding: 4px 0; border-bottom: 1px dashed var(--line); }
+  #story li b { font-variant-numeric: tabular-nums; color: var(--ink-2); font-weight: 600; margin-right: 4px; }
+  #story li.shut b, #story li.shock b { color: var(--red); }
+  #story li.invest b, #story li.open b { color: var(--green); }
+  #story li.beacon b { color: var(--gold); }
+  #story li.glut b { color: #9a6b3c; }
+  #summary { margin-top: 14px; }
+  #summary h2 { font-size: 20px; margin-bottom: 8px; }
+  #summary .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  #summary table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #summary td { padding: 3px 0; border-bottom: 1px dashed var(--line); }
+  #summary td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  #summary ul { margin: 0; padding-left: 18px; }
+  #summary li { margin: 3px 0; }
+  @media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 560px) { main { padding: 10px; } header h1 { font-size: 21px; } .clock b { min-width: 0; } }
+</style>
+</head>
+<body>
+<main>
+  <header class="card">
+    <div>
+      <div class="tag">Tidewater Market · fast-forward</div>
+      <h1>A week of trading in a minute</h1>
+      <p>Players comb the shore, mine the cliffs and dive the reef; Maren and Silas buy, craft, ship and pin notices, all priced by the same rules the live merchants use (<a href="https://github.com/charitra10/tidewater-market/blob/main/web/merchant.js" target="_blank" rel="noopener">merchant.js</a>). The tides, storms and events are the real ones for the coming week. Hover the charts to see why any price was what it was.</p>
+      <span class="honest">Simulation: no transactions. A real week of trading takes a week; this is what the rules would do.</span>
+    </div>
+    <div><a href="./" class="btn plain" style="text-decoration:none;display:inline-block">Back to the village</a></div>
+    <div class="controls" style="flex-basis:100%">
+      <button class="btn" id="play">Play</button>
+      <button class="btn plain" id="restart">Start again</button>
+      <label>Speed <select id="speed"><option value="10">a week in 10 seconds</option><option value="60" selected>a week in a minute</option><option value="180">a week in 3 minutes</option></select></label>
+      <label>Players <select id="players"><option>4</option><option selected>8</option><option>12</option><option>24</option></select></label>
+      <label title="New coin from the mainland each day: it pays for Maren's exports and Silas's shipments, standing in for the owner's top-ups">Mainland's purse per day <select id="mainland"><option value="2000">2000</option><option value="6000" selected>6000</option><option value="12000">12000</option></select></label>
+      <label>Seed <input id="seed" type="number" value="1" min="1"></label>
+      <label>Start from <select id="from"><option value="live">the live market</option><option value="fresh">a fresh market</option></select></label>
+    </div>
+    <div class="shocks" id="shocks" style="flex-basis:100%"></div>
+    <div class="clock" style="flex-basis:100%"><b id="when">Day 1</b><div class="bar"><i id="progress"></i></div><span id="seeded"></span></div>
+  </header>
+
+  <div class="grid">
+    <section class="card charts" id="charts"></section>
+    <aside>
+      <div class="card" id="moment"><h2>Hover a moment</h2><p class="sub">Move over a chart to see the market at that moment, and the working behind a price: pick which price in a chart's key.</p></div>
+      <div class="card"><h2>What happened</h2><ul id="story"></ul></div>
+    </aside>
+  </div>
+
+  <section class="card" id="summary" hidden></section>
+</main>
+<script type="module" src="./sim.js"></script>
+</body>
+</html>
