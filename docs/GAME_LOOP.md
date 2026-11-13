@@ -33,7 +33,7 @@ Then you walk to a buyer and decide:
 
 At the stall you can make an offer, take her price, walk away (she may call you back, but only once per haggle), or type to her. She has a hidden limit, patience that runs out, and a mood that remembers how you treated her ([`openHaggle`, `haggle`](../server/merchant.js)). A deal is a quote she posts on-chain, which you accept; she keeps it open for 2 minutes.
 
-**The choice every time: sell now, or hold.** Each extra unit you sell her is priced lower than the last, because her shelf is fuller. The tide may pay more in a couple of minutes, and Silas may have room in his hold.
+**The choice every time: sell now, or hold.** Each extra unit you sell her is priced lower than the last, because her shelf is fuller, and everyone's recent selling pulls her bid down for a while (by up to 25%, halving every 5 minutes). The tide may pay more in a couple of minutes, and Silas may have room in his hold. Hover over (or tap) any price to see how she worked it out.
 
 ## Every 5 minutes: half a tide
 
@@ -98,14 +98,13 @@ The market keeps moving whether or not you are at the stall:
   - buys board notices priced under her own bid;
   - pins her surplus ore for Silas when he would pay more than the mainland.
 - **Silas** ships at high tide or when his hold is full. When Maren is out of pearls for a beacon, he pins his for her.
-- **Prices follow the books.** Her bid for a good falls as her shelf fills and as her treasury runs low. Her asking price for a tool rises as her shelf empties ([`server/merchant.js`](../server/merchant.js)).
+- **Prices follow the books and recent demand.** Her bid for a good falls as her shelf fills, as her treasury runs low, and for a while after players have been selling it to her. Her asking price for a tool rises as her shelf empties and while players have been buying them ([`server/merchant.js`](../server/merchant.js)). Hover over any price at the stall to see the working.
 - **The guard rails** are checked by the contract on every deal: price floors and ceilings, a spending cap of 1500 coins per 10 minutes, stock and treasury checks. A refused deal is recorded on-chain with its reason.
 
 ## Planned, not built yet
 
 These are on the plan and are **not** in the game today:
 
-- **Recent demand** in her prices, as well as stock: a burst of players selling ore lowers her ore bid for a while, on top of what her fuller shelf already does.
 - **Broke merchants close, and players invest:**
   - a merchant whose treasury runs too low shuts the stall;
   - players lend it money to reopen;

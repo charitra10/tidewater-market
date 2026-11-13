@@ -446,6 +446,66 @@ function trend(token, upIsGood, dealer = false) {
   return `<span class="trend ${mood}" title="Price over the last few minutes"><svg viewBox="0 0 ${w} ${ht}" width="${w}" height="${ht}"><path d="${d}"/>${dot}</svg>${arrow}</span>`;
 }
 
+// ---------- why she asks what she asks: the reasoning behind each price ----------
+// The server sends each price with its working (`why`, from merchant.js), and
+// this panel shows it: hover or focus a price, or tap it on a phone.
+let whyKey = null; // "ask:pickaxe", "bid:kelp" or "silas:ore"
+let whyPinned = false; // opened by a tap or click, so it stays until dismissed
+const whyButton = (kind, row) => `<button class="why" data-why="${kind}:${row.token}" aria-describedby="why" title="Why this price?">${row.price}</button>`;
+function whyRow(key) {
+  const m = S.market;
+  const [kind, token] = key.split(":");
+  const board = kind === "ask" ? m?.board.sells : kind === "bid" ? m?.board.buys : m?.dealer?.board;
+  return board?.find((x) => x.token === token);
+}
+const whyNum = (v) => (v >= 100 ? Math.round(v) : Math.round(v * 10) / 10);
+function whyHtml(key) {
+  const row = whyRow(key);
+  const w = row?.why;
+  if (!w) return "";
+  const kind = key.split(":")[0];
+  const title = { ask: `She asks ${row.price}`, bid: `She'd pay ${row.price}`, silas: w.price ? `He'd pay ${row.price}` : "He isn't buying" }[kind];
+  const steps = w.steps
+    .map((st) => `<tr class="${st.factor === 1 ? "flat" : ""}"><td>${st.note}</td><td>${st.value !== undefined ? whyNum(st.value) : "×" + Math.round(st.factor * 100) / 100}</td></tr>`)
+    .join("");
+  const sum = w.steps.length > 1 ? `<tr class="sum"><td>Which makes</td><td>${whyNum(w.base)}</td></tr>` : "";
+  const limits = w.limits
+    .filter((l) => l.binds || (Number.isFinite(l.value) && l.value > 0))
+    .map((l) => `<tr class="limit${l.binds ? " binds" : ""}"><td>${l.note}</td><td>${l.binds ? "→ " + whyNum(l.value) : ""}</td></tr>`)
+    .join("");
+  return `<h4>${title}</h4><table>${steps}${sum}${limits}</table><p class="src">${kind === "silas" ? "His" : "Her"} rules are in merchant.js</p>`;
+}
+function placeWhy(anchor) {
+  const p = $("why");
+  const r = anchor.getBoundingClientRect();
+  const x = Math.min(innerWidth - p.offsetWidth - 8, Math.max(8, r.right - p.offsetWidth));
+  let y = r.bottom + 6;
+  if (y + p.offsetHeight > innerHeight - 8) y = Math.max(8, r.top - p.offsetHeight - 6);
+  p.style.left = x + "px";
+  p.style.top = y + "px";
+}
+function showWhy(anchor, pinned = false) {
+  const html = whyHtml(anchor.dataset.why);
+  if (!html) return hideWhy();
+  whyKey = anchor.dataset.why;
+  whyPinned = pinned;
+  $("why").innerHTML = html;
+  $("why").hidden = false;
+  placeWhy(anchor);
+}
+function hideWhy() {
+  whyKey = null;
+  whyPinned = false;
+  $("why").hidden = true;
+}
+/// After the stall redraws: the prices (and their reasons) may have moved.
+function refreshWhy() {
+  if (!whyKey) return;
+  const anchor = $("list").querySelector(`[data-why="${whyKey}"]`);
+  if (!anchor) return hideWhy();
+  showWhy(anchor, whyPinned);
+}
+
 // ---------- chain ----------
 let lastTxAt = -1e9;
 async function call(method, args = {}, deposit = 0n, label = method) {
@@ -730,6 +790,7 @@ function openShop(whoNow = "maren") {
   refresh();
 }
 function closeShop() {
+  hideWhy();
   S.shopOpen = false;
   document.body.classList.remove("shop-open");
   $("shop").hidden = true;
@@ -761,7 +822,7 @@ function renderShop() {
       const beats = hers != null && hers > b.price ? "up" : "down"; // green: you'd get more from her
       const vs = hers != null && m.dealer.open ? ` <span class="tide-note ${beats}">Maren pays about ${hers}</span>` : "";
       const sub = m.dealer.open
-        ? `You have ${have}. His hold has ${b.stock} of ${m.dealer.hold[b.token]} and he pays about ${b.price} each.${vs}`
+        ? `You have ${have}. His hold has ${b.stock} of ${m.dealer.hold[b.token]} and he pays about ${whyButton("silas", b)} each.${vs}`
         : `You have ${have}. Closed until the storm passes.`;
       html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true, true)}</div><div class="sub">${sub}</div></div>
         <div class="buy">${
@@ -785,7 +846,7 @@ function renderShop() {
       } else sub = `${w.stock} on the shelf. ${sub}`;
       if (mine > 0) sub += ` <b>You have ${mine}.</b>`;
       html += `<div class="item">${ICONS[w.token]}<div><div class="name">${NAMES[w.token]}${trend(w.token, false)}</div><div class="sub">${sub}</div></div>
-        <div class="buy">${w.price ? `<span class="p">${w.price}</span><button class="btn small" data-open="sell" data-token="${w.token}" data-qty="1">Haggle</button>` : ""}</div></div>`;
+        <div class="buy">${w.price ? `<button class="p why" data-why="ask:${w.token}" aria-describedby="why" title="Why this price?">${w.price}</button><button class="btn small" data-open="sell" data-token="${w.token}" data-qty="1">Haggle</button>` : ""}</div></div>`;
     }
   } else {
     for (const b of m.board.buys) {
@@ -793,7 +854,7 @@ function renderShop() {
       const qty = Math.max(1, Math.min(have, sellQty[b.token] ?? have));
       const his = m.dealer?.open ? m.dealer.board.find((x) => x.token === b.token)?.price : null;
       const vs = his ? ` <span class="tide-note ${his > b.price ? "up" : "down"}">Silas pays about ${his}</span>` : ""; // green: you'd get more from him
-      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${b.price} each.${tideNote(b.token)}${vs}</div></div>
+      html += `<div class="item">${ICONS[b.token]}<div><div class="name">${NAMES[b.token]}${trend(b.token, true)}</div><div class="sub">You have ${have}. She holds ${b.stock} and pays about ${whyButton("bid", b)} each.${tideNote(b.token)}${vs}</div></div>
         <div class="buy">${
           have > 0
             ? `<span class="qty"><button data-qty-token="${b.token}" data-d="-1">−</button>${qty}<button data-qty-token="${b.token}" data-d="1">+</button></span><button class="btn small" data-open="buy" data-token="${b.token}" data-qty="${qty}">Sell</button>`
@@ -806,6 +867,7 @@ function renderShop() {
     $("list").innerHTML = html;
     lastList = html;
   }
+  refreshWhy();
   renderDeal();
 }
 
@@ -821,9 +883,12 @@ function renderDeal() {
   const her = silasHere() ? "his" : "her";
   $("patience").textContent = session.final ? `${her} final offer` : "patience " + "●".repeat(session.patience) + "○".repeat(Math.max(0, 5 - session.patience));
   $("deal-hint").textContent = selling ? (session.counter > coins ? `You have ${coins} coins. Offer less, or sell her something first.` : "Offer less than she asks.") : `Ask for more than ${silasHere() ? "he" : "she"} offers.`;
+  $("deal-why").textContent = dealWhy;
+  $("deal-why").hidden = !dealWhy;
   for (const id of ["offer-go", "take", "walk", "offer-up", "offer-down"]) $(id).disabled = talking;
 }
 
+let dealWhy = ""; // why she just moved (or didn't), from the server; never her limit
 async function hag(body) {
   if (talking) return;
   talking = true;
@@ -832,6 +897,7 @@ async function hag(body) {
     const r = await api("/api/haggle", { player: me, merchant: shopWho, ...body });
     const fresh = body.action === "open";
     session = r.session;
+    dealWhy = r.why ?? "";
     sayBubble(r.reply);
     $("mood").textContent = r.mood;
     $("mood").className = "chip " + r.mood;
@@ -913,7 +979,8 @@ function noticeRow(l) {
   const total = l.unit * q;
   let compare;
   const merchant = cfg && (l.seller === cfg.merchantId || l.seller === cfg.dealerId);
-  if (merchant) compare = l.seller === cfg.merchantId ? "from her shelves: surplus for Silas, or for you" : "from his hold: pearls for Maren, or for you";
+  if (merchant && l.why) compare = l.why;
+  else if (merchant) compare = l.seller === cfg.merchantId ? "from her shelves: surplus for Silas, or for you" : "from his hold: pearls for Maren, or for you";
   else if (RAW.includes(l.token)) compare = `Maren pays about ${fmt(marenBid(l.token))}`;
   else {
     const ask = marenAsk(l.token);
@@ -1112,7 +1179,8 @@ const typingInField = () => ["INPUT", "TEXTAREA"].includes(document.activeElemen
 
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    if (!$("win").hidden) $("win").hidden = true;
+    if (whyKey) hideWhy();
+    else if (!$("win").hidden) $("win").hidden = true;
     else if (!$("ledger").hidden) $("ledger").hidden = true;
     else if (S.shopOpen) closeShop();
     else if (S.boardOpen) closeNotices();
@@ -1230,7 +1298,28 @@ $("list").addEventListener("click", (e) => {
     renderShop();
   } else if (b.dataset.open) {
     hag({ action: "open", side: b.dataset.open, token: b.dataset.token, qty: Number(b.dataset.qty) });
+  } else if (b.dataset.why) {
+    if (whyPinned && whyKey === b.dataset.why) hideWhy();
+    else showWhy(b, true);
   }
+});
+// hover or keyboard focus shows a price's reasons; a click or tap keeps them open
+$("list").addEventListener("mouseover", (e) => {
+  const a = e.target.closest("[data-why]");
+  if (a && !whyPinned) showWhy(a);
+});
+$("list").addEventListener("mouseout", (e) => {
+  const a = e.target.closest("[data-why]");
+  if (a && !whyPinned && !a.contains(e.relatedTarget)) hideWhy();
+});
+$("list").addEventListener("focusin", (e) => {
+  const a = e.target.closest("[data-why]");
+  if (a && !whyPinned) showWhy(a);
+});
+$("list").addEventListener("focusout", () => !whyPinned && hideWhy());
+$("list").addEventListener("scroll", hideWhy, { passive: true });
+addEventListener("pointerdown", (e) => {
+  if (whyKey && !e.target.closest("#why, [data-why]")) hideWhy();
 });
 $("offer-go").onclick = () => hag({ action: "offer", price: Number($("offer").value) });
 $("take").onclick = () => hag({ action: "accept" });

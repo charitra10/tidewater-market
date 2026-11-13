@@ -141,6 +141,22 @@
   .need.short { color: var(--red); font-weight: 600; }
   #shop footer, #notices footer { padding: 8px 14px 12px; font-size: 12.5px; color: var(--ink-2); border-top: 1px solid var(--line); }
   .board-hint { margin: 12px 0 4px; }
+  /* why a price is what it is: hover, focus or tap a price */
+  button.why { border: 0; padding: 0 1px; background: none; font: inherit; font-weight: 700; color: var(--ink); cursor: help; border-bottom: 1.5px dotted var(--ink-2); border-radius: 0; }
+  button.why:hover, button.why:focus-visible { background: #fff3cf; outline: none; }
+  .item button.p.why { font-weight: 800; font-size: 15px; font-variant-numeric: tabular-nums; }
+  #why { position: fixed; z-index: 30; width: min(320px, calc(100vw - 16px)); padding: 10px 12px 8px; font-size: 12.5px; line-height: 1.35; pointer-events: auto; }
+  #why h4 { margin: 0 0 6px; font-size: 14px; }
+  #why table { width: 100%; border-collapse: collapse; }
+  #why td { padding: 2px 0; vertical-align: top; }
+  #why td:last-child { text-align: right; padding-left: 10px; white-space: nowrap; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #why tr.flat { color: var(--ink-2); }
+  #why tr.flat td:last-child { font-weight: 500; }
+  #why tr.sum td { border-top: 1px solid var(--line); padding-top: 4px; font-weight: 700; }
+  #why tr.limit td { color: var(--ink-2); font-style: italic; }
+  #why tr.limit.binds td { color: var(--red); font-style: normal; font-weight: 700; }
+  #why .src { margin: 6px 0 0; font-size: 11px; color: var(--ink-2); }
+  #deal-why { font-style: italic; }
 
   /* the notice board */
   #notices { right: auto; left: 12px; } /* on the left, so the board itself stays in view */
@@ -265,6 +281,7 @@
     </div>
     <div class="row"><button class="btn plain small" id="walk">Walk away</button><span id="patience"></span></div>
     <div class="row"><span id="deal-hint" class="sub"></span></div>
+    <div class="row"><span id="deal-why" class="sub" hidden></span></div>
   </div>
   <div class="sayrow">
     <input id="say" placeholder="Say something to her…" maxlength="200" autocomplete="off">
@@ -280,6 +297,8 @@
     <ul id="news"></ul>
   </footer>
 </aside>
+
+<div id="why" class="card" role="tooltip" hidden></div>
 
 <aside id="notices" class="card" hidden>
   <header>

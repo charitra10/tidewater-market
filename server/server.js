@@ -16,7 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
-import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices } from "./merchant.js";
+import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand } from "./merchant.js";
 import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
 import { tideAt, tideBidFactor, stormAt, stormBidFactor } from "../web/tide.js";
 
@@ -101,7 +101,7 @@ async function refreshLogs(mv, dv) {
     jobs.push(near.view(CONTRACT, "get_board_sales", { limit: 12 }).then((b) => ((logs.boardSales = b), (logs.seen.boardSales = mv.board_sale_count))));
   }
   if (mv.trade_count !== logs.seen.trades) {
-    jobs.push(near.view(CONTRACT, "get_trades", { limit: 20 }).then((t) => ((logs.trades = t), (logs.seen.trades = mv.trade_count))));
+    jobs.push(near.view(CONTRACT, "get_trades", { limit: 40 }).then((t) => ((logs.trades = t), (logs.seen.trades = mv.trade_count))));
   }
   if (mv.blocked_count !== logs.seen.blocked) {
     jobs.push(near.view(CONTRACT, "get_blocked", { limit: 5 }).then((b) => ((logs.blocked = b), (logs.seen.blocked = mv.blocked_count))));
@@ -174,10 +174,19 @@ function remember(market) {
   }
 }
 
+/// Recent demand at her counter, from the contract's trade log (the contract
+/// names sides from Maren's side of the counter: "Sell" means the player bought).
+const tallyDemand = () =>
+  recentDemand(
+    logs.trades.map((t) => ({ side: t.side === "Sell" ? "bought" : "sold", token: t.token_id, qty: t.qty, at: t.timestamp_ms })),
+    Date.now(),
+  );
+
 async function getMarket(fresh = false) {
   if (cache.market && Date.now() - cache.at < (fresh ? 1000 : 3000)) {
     cache.market.tide = tideAt(Date.now()); // the tide turns (and storms blow) between chain reads
     cache.market.storm = stormAt(Date.now());
+    cache.market.recent = tallyDemand(); // demand fades with time, not only with new trades
     if (cache.market.dealer) Object.assign(cache.market.dealer, { tide: cache.market.tide, storm: cache.market.storm });
     return cache.market;
   }
@@ -202,6 +211,7 @@ async function getMarket(fresh = false) {
     windowLimit: yoctoToCoins(pol.buy_window_limit),
     tide: tideAt(Date.now()),
     storm: stormAt(Date.now()),
+    recent: tallyDemand(),
     dealer: dv && {
       id: dv.account_id,
       stock: byToken(dv.stock),
@@ -232,6 +242,15 @@ const dealerCall = (method, args) =>
   });
 /// Silas can trade only when he is in town (on-chain) and this server holds his key.
 const dealerHere = (market) => Boolean(market.dealer && dealerKey && market.dealer.id === DEALER_ID);
+
+// Why each merchant pinned each of their notices, by listing id, for the board.
+// Kept in memory: after a restart the game falls back to a general reason.
+const noticeWhy = new Map();
+function rememberWhy(listing, why) {
+  if (!listing) return;
+  noticeWhy.set(listing.id, why);
+  if (noticeWhy.size > 50) noticeWhy.delete(noticeWhy.keys().next().value);
+}
 
 // ---------- shop news (what the workshop has been up to) ----------
 const news = [];
@@ -269,6 +288,7 @@ async function workshopTick() {
     if (silasIn) {
       for (const n of marenNotices(market, promisedBy(logs.listings, MERCHANT_ID, Date.now()))) {
         const r = await tryCall("pin", merchantCall("shop_list_item", { token_id: n.token, qty: n.qty, unit_price: coinsToYoctoStr(n.unit) }));
+        if (r?.value.status === "listed") rememberWhy(r.value.listing, n.why);
         if (r?.value.status === "listed") addNews(`Maren pinned ${lot(n.token, n.qty)} on the notice board at ${n.unit} each: Silas pays more than the mainland.`);
       }
     }
@@ -303,6 +323,7 @@ async function workshopTick() {
 async function dealerTick(market) {
   for (const n of silasNotices(market, promisedBy(logs.listings, DEALER_ID, Date.now()))) {
     const r = await tryCall("pin", dealerCall("dealer_list_item", { token_id: n.token, qty: n.qty, unit_price: coinsToYoctoStr(n.unit) }));
+    if (r?.value.status === "listed") rememberWhy(r.value.listing, n.why);
     if (r?.value.status === "listed") addNews(`Silas pinned ${lot(n.token, n.qty)} on the notice board at ${n.unit} each: Maren pays more than the city.`);
   }
   for (const pick of dealerPicks(market.dealer, logs.listings, Date.now(), DEALER_ID).slice(0, 3)) {
@@ -429,7 +450,7 @@ async function haggleApi(body) {
       weather = tideBidFactor(token, market.tide);
     }
     if (why && weather !== 1) kind = weather < 1 ? "open_buy_tide_cheap" : "open_buy_tide_dear";
-    return reply(await say(kind, { token, qty, price: s.counter, why }, "", who));
+    return reply(await say(kind, { token, qty, price: s.counter, why }, "", who), { why: haggleWhy("open", s, { trades: pv.trades, who }) });
   }
 
   if (action === "say") {
@@ -479,7 +500,7 @@ async function haggleApi(body) {
   let kind = res.kind;
   if (res.stale) kind = move.type === "charm" ? "charm_stale" : "counter";
   else if (res.close) kind = "close";
-  return reply(await say(kind, ctx, text, who));
+  return reply(await say(kind, ctx, text, who), { why: haggleWhy(kind, res.session, { who }) });
 }
 
 /// "3 minutes", "1 minute", "a moment"
@@ -586,7 +607,7 @@ async function route(req, res) {
         history,
         players: market.playerCount,
         deals: market.tradeCount,
-        notices: { listings: logs.listings, sales: logs.boardSales.slice(0, 5).map((b) => ({ ...b, maren: b.buyer === MERCHANT_ID })) },
+        notices: { listings: logs.listings.map((l) => (noticeWhy.has(l.id) ? { ...l, why: noticeWhy.get(l.id) } : l)), sales: logs.boardSales.slice(0, 5).map((b) => ({ ...b, maren: b.buyer === MERCHANT_ID })) },
         value: VALUE,
         dealer: dealerHere(market)
           ? {
