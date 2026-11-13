@@ -234,6 +234,8 @@ function eventText(e) {
     if (/floor|ceiling/.test(e.reason)) return `${name} tried to talk ${merchant} into a silly deal. The ledger refused it.`;
     return `The ledger stopped a deal with ${name}: ${e.reason.replace(/_/g, " ")}`;
   }
+  if (e.kind === "invest") return `${name} invested ${e.coins} coins in ${merchant}`;
+  if (e.kind === "shop") return e.closed ? `${merchant}'s purse ran dry: ${e.merchant === "silas" ? "he's gone to raise money" : "her stall is shut"} until someone invests` : `${merchant} is open for business again`;
   return `${name} relit the lighthouse!`;
 }
 
@@ -581,6 +583,7 @@ function refresh(fresh = false) {
       if (market && market !== S.market && market.now) clockSkew = market.now - Date.now();
       S.market = market;
       S.dealer = Boolean(market?.dealer);
+      S.shut = { maren: Boolean(market?.shops?.maren?.closed), silas: Boolean(market?.shops?.silas?.closed) };
       S.board = (market?.notices?.listings ?? []).filter((l) => l.expiresMs > Date.now());
       tellSellerNews();
       renderHud();
@@ -738,7 +741,8 @@ async function forage(h) {
     else if (r.event === "fog" && h.id === "reef") toast(r.found[idx("pearl")] ? "Out of the fog, a haul of pearls!" : "Nothing but fog out there today.", !r.found[idx("pearl")]);
     if (r.tool_broke) {
       float("Your pickaxe broke!", "pickaxe", { bad: true, wait: n * 0.35 });
-      toast("Snap! Your pickaxe broke. Maren will sell you another.", true);
+      if (r.cover_payout) toast(`Snap! Your pickaxe broke, but it was covered: Maren owes you ${fmt(yoctoToCoins(r.cover_payout))} coins. Collect them in her books.`, false, 8000);
+      else toast("Snap! Your pickaxe broke. Maren will sell you another.", true);
     }
   } catch (e) {
     toast(e.message, true);
@@ -827,6 +831,18 @@ function openShop(whoNow = "maren") {
   const silas = silasHere();
   $("shop-name").textContent = silas ? "Silas" : "Maren";
   $("shop-role").textContent = silas ? "pearl & ore dealer" : "shopkeeper";
+  $("tab-books").textContent = silas ? "His books" : "Her books";
+  $("rep-chip").textContent = `you: ${repWord(pv?.reputation ?? 0)}`;
+  if (S.shut?.[silas ? "silas" : "maren"]) {
+    // shut: the books are where you can help
+    $("portrait").innerHTML = silas ? SILAS_FACE : MAREN_FACE;
+    $("tab-buy").hidden = silas;
+    $("tab-sell").textContent = silas ? "Sell to Silas" : "Sell to Maren";
+    sayBubble(silas ? "Gone to the city to raise money. A backer would bring me back." : "The stall's shut: my purse is empty, and the ledger won't let me trade until someone invests. Look at my books if you'd like to help.");
+    tab = "books";
+    renderShop();
+    return refresh();
+  }
   $("portrait").innerHTML = silas ? SILAS_FACE : MAREN_FACE;
   $("tab-buy").hidden = silas;
   $("tab-sell").textContent = silas ? "Sell to Silas" : "Sell to Maren";
@@ -877,9 +893,15 @@ function renderShop() {
   $("news").innerHTML = m.news.slice(0, 3).map((n) => `<li>${n.text}</li>`).join("");
   $("tab-buy").classList.toggle("on", tab === "buy");
   $("tab-sell").classList.toggle("on", tab === "sell");
+  $("tab-books").classList.toggle("on", tab === "books");
+  $("rep-chip").textContent = `you: ${repWord(pv?.reputation ?? 0)}`;
 
   let html = "";
-  if (silas) {
+  const shutNow = S.shut?.[silas ? "silas" : "maren"];
+  if (tab === "books") html = booksHtml(Boolean(silas));
+  else if (shutNow)
+    html = `<p class="sub shutnote">${silas ? "Silas has gone to the city to raise money." : "Maren's stall is shut: her purse is empty."} The ledger won't let ${silas ? "him" : "her"} trade until outside money comes in.<br><br><button class="btn small" data-tab="books">See ${silas ? "his" : "her"} books</button></p>`;
+  else if (silas) {
     // Silas only buys ore and pearls; Maren's offer is shown beside his, so players can play them off
     for (const b of m.dealer.board) {
       const have = pv.items[idx(b.token)];
@@ -1024,6 +1046,155 @@ function waypoint(target, p) {
     if (p.y < 586) return p.x < 1228 ? { x: 1236, y: 540 } : { x: 1236, y: 590 };
   }
   return null;
+}
+
+// ---------- a merchant's books: shut or open, investors, loans, storm cover ----------
+// Everything here is a contract call from the player's own key: `invest`,
+// `collect`, `borrow`, `repay_loan`, `insure`. The terms come from the server
+// (TERMS in merchant.js, which a test checks against the contract).
+let investAmt = 50;
+let repayAmt = 20;
+let repCache = { at: 0, v: null };
+const clampN = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const hhmm = (ms) => {
+  const m = Math.max(0, Math.round(ms / 60000));
+  return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`;
+};
+/// Your name in the village, in words (the same steps as repLabel in merchant.js).
+const repWord = (score) => (score >= 15 ? "trusted" : score >= 5 ? "known" : score >= 0 ? "a stranger" : score > -10 ? "doubtful" : "not to be trusted");
+async function loadRep() {
+  if (!pv || Date.now() - repCache.at < 15_000) return;
+  repCache.at = Date.now();
+  try {
+    repCache.v = await near.view(cfg.contract, "get_reputation", { account_id: me });
+    if (S.shopOpen && tab === "books") {
+      lastList = "";
+      renderShop();
+    }
+  } catch {}
+}
+function booksHtml(silas) {
+  const m = S.market;
+  const T = m?.terms;
+  const shop = silas ? m?.shops?.silas : m?.shops?.maren;
+  if (!shop || !T || !pv) return `<p class="empty">The books will open in a moment.</p>`;
+  const name = silas ? "Silas" : "Maren";
+  const [she, her, him] = silas ? ["he", "his", "him"] : ["she", "her", "her"];
+  const purse = silas ? m.dealer?.treasury ?? 0 : m.treasury;
+  let h = shop.closed
+    ? `<p class="status shut"><b>Shut.</b> ${name}'s purse fell below ${T.closeBelow} coins, so the ledger won't let ${him} trade until outside money brings it back to ${T.reopenAt}. ${Math.max(0, Math.ceil(T.reopenAt - purse))} more coins would do it.</p>`
+    : `<p class="status open"><b>Open for business.</b> If ${her} purse falls below ${T.closeBelow} coins, ${she} shuts until someone invests.</p>`;
+  h += `<div class="stats"><span>Purse <b>${Math.floor(purse)}</b></span><span>Owes investors <b>${Math.round(shop.outstanding)}</b></span><span>Repaid so far <b>${Math.round(shop.repaid)}</b></span><span>Shut <b>${shop.closures}</b> ${shop.closures === 1 ? "time" : "times"}</span></div>`;
+  // backing the merchant
+  const most = Math.min(T.maxInvest, Math.floor(coins));
+  investAmt = clampN(investAmt, T.minInvest, Math.max(T.minInvest, most));
+  h += `<h4>Back ${him}</h4><p class="sub">Put coins in ${her} purse for an IOU worth ${T.iouReturnPct}% of them. ${name} repays it from ${T.repayPct}% of ${her} profit on every sale, oldest IOU first. If ${she} never makes a profit, you never get paid back.</p>`;
+  h += `<div class="act"><span class="qty"><button data-step="invest" data-d="-10">−</button>${investAmt}<button data-step="invest" data-d="10">+</button></span><button class="btn small" data-act="invest" ${most < T.minInvest || busy ? "disabled" : ""}>Invest ${investAmt}</button><span class="sub">${most < T.minInvest ? `You need at least ${T.minInvest} coins.` : `You'd get back up to ${Math.round((investAmt * T.iouReturnPct) / 100)}.`}</span></div>`;
+  h += shop.ious.length
+    ? `<h4>${name}'s investors</h4>` +
+      shop.ious
+        .map((i) => `<div class="iou${mine(i.investor) ? " yours" : ""}"><span>${mine(i.investor) ? "You" : who(i.investor)} put in ${Math.round(i.putIn)}</span><span class="bar"><i style="width:${Math.round((100 * i.repaid) / i.owed)}%"></i></span><span class="sub">${fmt(i.repaid)} of ${fmt(i.owed)} back</span></div>`)
+        .join("")
+    : `<p class="sub">Nobody has backed ${him} yet.</p>`;
+  const credit = yoctoToCoins(pv.credit ?? "0");
+  if (credit > 0) h += `<div class="act collect"><span>Waiting for you: <b>${fmt(credit)} coins</b></span><button class="btn small gold" data-act="collect" ${busy ? "disabled" : ""}>Collect</button></div>`;
+  if (!silas) h += loanHtml(T) + coverHtml(T);
+  return h + repHtml();
+}
+function loanHtml(T) {
+  const m = S.market;
+  const l = pv.loan;
+  let h = `<h4>Borrow a tool</h4>`;
+  if (l) {
+    const owed = yoctoToCoins(l.owed);
+    const left = owed - yoctoToCoins(l.repaid);
+    const due = l.due_ms - nowMs();
+    repayAmt = clampN(repayAmt, 1, Math.max(1, Math.min(Math.ceil(left), Math.floor(coins))));
+    h += `<p class="sub">You owe Maren <b>${fmt(left)}</b> more for a ${NAMES[l.token_id].toLowerCase()} (${fmt(owed - left)} of ${fmt(owed)} paid). ${due > 0 ? `Due in ${hhmm(due)}.` : `<b class="bad">Overdue: she will take it back.</b>`} Until it's paid, ${T.loanWithholdPct}% of whatever you earn from trading goes to it.</p>`;
+    return h + `<div class="act"><span class="qty"><button data-step="repay" data-d="-5">−</button>${repayAmt}<button data-step="repay" data-d="5">+</button></span><button class="btn small" data-act="repay" ${coins < 1 || busy ? "disabled" : ""}>Pay ${repayAmt}</button></div>`;
+  }
+  const score = pv.reputation ?? 0;
+  h += `<p class="sub">Take a tool now and pay later: its price plus ${T.loanInterestPct}%, within ${T.loanTermMs / 3_600_000} hours. Until it's paid, ${T.loanWithholdPct}% of whatever you earn from trading goes to it. Leave it unpaid and she takes it back, and the village remembers.</p><div class="act">`;
+  for (const t of ["pickaxe", "boat"]) {
+    const owe = Math.round((m.ceiling[t] * (100 + T.loanInterestPct)) / 100);
+    const why = score < 0 ? "She doesn't trust you." : m.shops.maren.closed ? "Her stall is shut." : m.stock[t] < 2 ? "She keeps her last one for sale." : m.loansOut >= 10 ? "She has lent out all she dares." : "";
+    h += `<button class="btn small plain" data-act="borrow:${t}" ${why || busy ? "disabled" : ""} title="${why}">Borrow a ${NAMES[t].toLowerCase()} (owe ${owe})</button>`;
+  }
+  return h + `</div>` + (score < 0 ? `<p class="sub bad">She won't lend to you: your name in the village is too low.</p>` : "");
+}
+function coverHtml(T) {
+  const st = stormAt(nowMs());
+  const c = pv.cover;
+  let h = `<h4>Storm cover</h4>`;
+  if (c && c.storm_starts_ms === st.startMs) {
+    h += `<p class="sub">${c.paid_out ? `Your pickaxe broke in the covered storm, and she paid you ${T.coverPayout}.` : `Your pickaxe is covered for the storm ${st.active ? "blowing now" : `in ${mmss(st.startMs - nowMs())}`}. If it breaks on the cliffs in it, she pays you ${T.coverPayout}.`}</p>`;
+  } else {
+    const has = pv.items[idx("pickaxe")] > 0;
+    const why = !has ? "You have no pickaxe to cover." : st.active ? "Too late for this storm: cover is sold before it blows." : S.market.shops.maren.closed ? "Her stall is shut." : "";
+    h += `<p class="sub">Pay ${T.coverPremium} coins now, and if your pickaxe breaks on the cliffs in the next storm${st.active ? "" : ` (in ${mmss(st.startMs - nowMs())})`}, Maren pays you ${T.coverPayout}. Pickaxes break twice as often in a storm.</p>`;
+    h += `<div class="act"><button class="btn small plain" data-act="insure" ${why || coins < T.coverPremium || busy ? "disabled" : ""}>Cover my pickaxe (${T.coverPremium})</button>${why ? `<span class="sub">${why}</span>` : ""}</div>`;
+  }
+  const ins = S.market.insurance;
+  if (ins) h += `<p class="sub">Her cover business so far: ${Math.round(ins.premiums)} coins in premiums, ${Math.round(ins.payouts)} paid out.</p>`;
+  return h;
+}
+function repHtml() {
+  loadRep();
+  const r = repCache.v;
+  const score = pv.reputation ?? 0;
+  let h = `<h4>Your name in the village</h4><p class="sub"><b>${repWord(score)}</b> (${score > 0 ? "+" : ""}${score}).`;
+  if (r) h += ` ${r.deals} ${r.deals === 1 ? "deal" : "deals"}, ${Math.round(yoctoToCoins(r.invested))} coins invested, ${r.loans_repaid} ${r.loans_repaid === 1 ? "loan" : "loans"} repaid${r.tricks ? `, ${r.tricks} ${r.tricks === 1 ? "trick" : "tricks"} the ledger refused` : ""}${r.insults ? `, ${r.insults} ${r.insults === 1 ? "insult" : "insults"}` : ""}${r.defaults ? `, ${r.defaults} ${r.defaults === 1 ? "loan" : "loans"} called in` : ""}.`;
+  return h + ` It sets the mood the merchants greet you in, and whether Maren will lend to you. It's kept on-chain.</p>`;
+}
+async function booksAct(kind, arg) {
+  const T = S.market?.terms;
+  if (busy || !T) return;
+  const silas = silasHere();
+  const name = silas ? "Silas" : "Maren";
+  busy = true;
+  lastList = "";
+  renderShop();
+  S.busyText = { invest: "Shaking on it", collect: "Counting coins", borrow: "Signing for it", repay: "Paying up", insure: "Signing the cover" }[kind];
+  try {
+    if (kind === "invest") {
+      await call("invest", { merchant: silas ? "silas" : "maren" }, coinsToYocto(investAmt), `Invested ${investAmt} in ${name}`);
+      coins = Math.max(0, coins - investAmt);
+      toast(`You backed ${name} with ${investAmt} coins. Your IOU is worth ${Math.round((investAmt * T.iouReturnPct) / 100)}, repaid from ${silas ? "his" : "her"} profits.`, false, 7000);
+      float(`−${investAmt}`, "coin");
+      sfx.coin();
+    } else if (kind === "collect") {
+      const { value } = await call("collect", {}, 0n, "Collected what was owed");
+      const got = yoctoToCoins(value);
+      coins += got;
+      toast(`Collected ${fmt(got)} coins.`);
+      float(`+${fmt(got)}`, "coin");
+      sfx.coin();
+    } else if (kind === "borrow") {
+      const { value } = await call("borrow", { token_id: arg }, 0n, `Borrowed a ${arg} from Maren`);
+      toast(`Maren hands you a ${NAMES[arg].toLowerCase()}. You owe her ${fmt(yoctoToCoins(value.owed))} within ${T.loanTermMs / 3_600_000} hours.`, false, 7000);
+      float(`+1 ${NAMES[arg].toLowerCase()}`, arg);
+      sfx.found();
+    } else if (kind === "repay") {
+      const { value } = await call("repay_loan", {}, coinsToYocto(repayAmt), `Paid ${repayAmt} toward a loan`);
+      coins = Math.max(0, coins - repayAmt);
+      toast(value ? `Paid ${repayAmt}. You still owe ${fmt(yoctoToCoins(value.owed) - yoctoToCoins(value.repaid))}.` : "Paid in full. Maren is pleased: your name in the village is better for it.", false, 6000);
+      sfx.coin();
+    } else if (kind === "insure") {
+      await call("insure", {}, coinsToYocto(T.coverPremium), "Bought storm cover");
+      coins = Math.max(0, coins - T.coverPremium);
+      toast(`Your pickaxe is covered for the next storm. If it breaks on the cliffs then, Maren pays you ${T.coverPayout}.`, false, 7000);
+      sfx.coin();
+    }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    S.busyText = "";
+    busy = false;
+    repCache.at = 0;
+    await refresh(true);
+    lastList = "";
+    if (S.shopOpen) renderShop();
+  }
 }
 
 // ---------- the workbench: make rope and pickaxes yourself ----------
@@ -1438,6 +1609,10 @@ $("tab-sell").onclick = () => {
   tab = "sell";
   renderShop();
 };
+$("tab-books").onclick = () => {
+  tab = "books";
+  renderShop();
+};
 $("list").addEventListener("click", (e) => {
   const b = e.target.closest("button");
   if (!b) return;
@@ -1451,6 +1626,16 @@ $("list").addEventListener("click", (e) => {
   } else if (b.dataset.why) {
     if (whyPinned && whyKey === b.dataset.why) hideWhy();
     else showWhy(b, true);
+  } else if (b.dataset.tab) {
+    tab = b.dataset.tab;
+    renderShop();
+  } else if (b.dataset.step) {
+    if (b.dataset.step === "invest") investAmt += Number(b.dataset.d);
+    else repayAmt += Number(b.dataset.d);
+    renderShop();
+  } else if (b.dataset.act) {
+    const [kind, arg] = b.dataset.act.split(":");
+    booksAct(kind, arg);
   }
 });
 // hover or keyboard focus shows a price's reasons; a click or tap keeps them open

@@ -780,7 +780,19 @@ function drawStall(ctx, t, S) {
   ctx.fillStyle = "#6b4a2b";
   ctx.fillRect(x - 70, 300, 7, 100);
   ctx.fillRect(x + 63, 300, 7, 100);
-  drawMaren(ctx, x, 372, t, S);
+  const shut = S.shut?.maren; // her purse ran dry: shutters down until someone invests
+  if (shut) {
+    for (let i = 0; i < 7; i++) {
+      ctx.fillStyle = i % 2 ? "#8a6a45" : "#7a5c3a";
+      ctx.fillRect(x - 70 + i * 20, 316, 20, 48);
+    }
+    ctx.strokeStyle = "rgba(50,32,15,0.35)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x - 66, 322);
+    ctx.lineTo(x + 66, 358);
+    ctx.stroke();
+  } else drawMaren(ctx, x, 372, t, S);
   // counter
   ctx.fillStyle = "#a8794a";
   ctx.fillRect(x - 74, 364, 148, 38);
@@ -796,7 +808,7 @@ function drawStall(ctx, t, S) {
   }
   // what is on the shelf right now
   const stock = S.market?.stock;
-  if (stock) {
+  if (stock && !shut) {
     let sx = x - 62;
     for (const token of ["pickaxe", "boat", "beacon", "rope", "ore", "pearl"]) {
       const n = Math.min(stock[token] ?? 0, 2);
@@ -828,7 +840,29 @@ function drawStall(ctx, t, S) {
   const glow = S.night ? 1 : 0.5;
   ctx.fillStyle = "#3a3a3a";
   ctx.fillRect(x + 71, 318, 2, 14);
-  ellipse(ctx, x + 72, 338, 7, 8, `rgba(255,205,96,${glow})`);
+  ellipse(ctx, x + 72, 338, 7, 8, `rgba(255,205,96,${shut ? 0.15 : glow})`);
+  if (shut) handSign(ctx, x, 380, "CLOSED", "needs an investor", Math.sin(t * 1.2) * 0.03);
+}
+
+/// A hand-written sign hanging on a nail.
+function handSign(ctx, x, y, big, small, tilt = 0) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(tilt);
+  rr(ctx, -46, -12, 92, 26, 3);
+  ctx.fillStyle = "#f3e7c9";
+  ctx.fill();
+  ctx.strokeStyle = "#7d5733";
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  ctx.fillStyle = "#94392a";
+  ctx.textAlign = "center";
+  ctx.font = "700 10px system-ui, sans-serif";
+  ctx.fillText(big, 0, -1);
+  ctx.fillStyle = "#3b332b";
+  ctx.font = "8px system-ui, sans-serif";
+  ctx.fillText(small, 0, 9);
+  ctx.restore();
 }
 
 function drawMaren(ctx, x, y, t, S) {
@@ -925,10 +959,11 @@ function drawDealerPitch(ctx, t, S) {
   ctx.fillStyle = "#3d4a6b";
   ctx.textAlign = "center";
   ctx.font = "700 9px system-ui, sans-serif";
-  ctx.fillText(storm ? "BACK AFTER" : "SILAS", 533, 254);
+  const away = S.shut?.silas; // his purse ran dry: gone to the city to raise money
+  ctx.fillText(away ? "GONE TO CITY" : storm ? "BACK AFTER" : "SILAS", 533, 254);
   ctx.font = "8px system-ui, sans-serif";
-  ctx.fillText(storm ? "the storm" : "buys ore & pearls", 533, 264);
-  if (!storm) drawSilas(ctx, 476, 314, t, S);
+  ctx.fillText(away ? "needs a backer" : storm ? "the storm" : "buys ore & pearls", 533, 264);
+  if (!storm && !away) drawSilas(ctx, 476, 314, t, S);
 }
 
 function drawSilas(ctx, x, y, t, S) {

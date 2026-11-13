@@ -25,6 +25,36 @@ export const RECIPES = {
 /// Treasury (in coins) at which she feels comfortable.
 export const COMFORTABLE = 600;
 
+/// The contract's terms for shops that go broke, investors, loans and storm
+/// cover (the same numbers as the constants in contract/src/lib.rs; a test
+/// reads them from there). Coins.
+export const TERMS = {
+  closeBelow: 150, // a merchant whose purse falls below this shuts up shop
+  reopenAt: 400, // and opens again once outside money brings it back to this
+  minInvest: 20,
+  maxInvest: 500,
+  iouReturnPct: 120, // an IOU is worth 120% of the stake
+  repayPct: 30, // repaid from 30% of the merchant's margin on each sale
+  loanInterestPct: 10, // a tool on loan costs its price ceiling plus 10%
+  loanTermMs: 2 * 60 * 60 * 1000,
+  loanWithholdPct: 50, // half of the borrower's takings go to the loan
+  coverPremium: 15,
+  coverPayout: 45,
+};
+
+/// A player's name in the village (the contract's reputation score) in words,
+/// and the mood Maren starts a haggle in because of it.
+export function repLabel(score) {
+  if (score >= 15) return "trusted";
+  if (score >= 5) return "known";
+  if (score >= 0) return "a stranger";
+  if (score > -10) return "doubtful";
+  return "not to be trusted";
+}
+export function repMood(score) {
+  return score >= 15 ? 1 : score <= -10 ? -2 : score < 0 ? -1 : 0;
+}
+
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /// `market`: { stock: {token: n}, avgCost: {token: coins}, treasury: coins,
@@ -441,6 +471,8 @@ export function haggleWhy(kind, session, { trades = 0, who = "maren" } = {}) {
   switch (kind) {
     case "open": {
       const parts = [];
+      if (s.reputation != null && s.reputation >= 15) parts.push("your name in the village is good");
+      if (s.reputation != null && s.reputation < 0) return cap(`${she} has heard about you, so ${she} starts out wary.`);
       if (trades >= 15) parts.push(`you're one of ${her} best customers`);
       else if (trades >= 5) parts.push("you're a regular");
       if (s.qty >= 5 && who !== "silas") parts.push("it's a big lot");

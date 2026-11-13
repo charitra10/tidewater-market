@@ -158,6 +158,21 @@
   #why tr.limit.binds td { color: var(--red); font-style: normal; font-weight: 700; }
   #why .src { margin: 6px 0 0; font-size: 11px; color: var(--ink-2); }
   #deal-why { font-style: italic; }
+  /* a merchant's books: shut or open, investors, loans, storm cover, your name */
+  #list h4 { margin: 14px 0 3px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--ink-2); }
+  #list .status { margin: 10px 0 6px; padding: 8px 10px; border-radius: 9px; font-size: 13px; }
+  #list .status.open { background: #e2efe5; color: #2d6e46; }
+  #list .status.shut { background: #f3dcd5; color: #94392a; }
+  #list .stats { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--ink-2); }
+  #list .stats b { color: var(--ink); }
+  #list .act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 2px; }
+  #list .act.collect { justify-content: space-between; padding: 7px 10px; border-radius: 9px; background: rgba(217, 164, 65, .18); font-size: 13px; }
+  #list .iou { display: grid; grid-template-columns: 1fr 90px auto; gap: 8px; align-items: center; font-size: 12.5px; padding: 3px 0; }
+  #list .iou.yours { font-weight: 700; }
+  #list .bar { height: 7px; border-radius: 4px; background: var(--paper-2); overflow: hidden; }
+  #list .bar i { display: block; height: 100%; background: var(--green); }
+  #list .bad { color: var(--red); }
+  #list .shutnote { text-align: center; padding: 22px 8px; }
 
   /* the notice board */
   #notices { right: auto; left: 12px; } /* on the left, so the board itself stays in view */
@@ -273,7 +288,7 @@
     <div id="portrait"></div>
     <div class="who">
       <h2 id="shop-name">Maren</h2>
-      <span id="mood" class="chip">even</span><span class="chip" id="shop-role">shopkeeper</span>
+      <span id="mood" class="chip">even</span><span class="chip" id="shop-role">shopkeeper</span><span class="chip" id="rep-chip" title="Your name in the village: from your deals, stakes, loans, tricks and insults, on-chain"></span>
     </div>
     <button class="x" id="shop-close" title="Leave the stall (Esc)">×</button>
   </header>
@@ -299,6 +314,7 @@
   <div class="tabs">
     <button id="tab-buy" class="on">Buy from Maren</button>
     <button id="tab-sell">Sell to Maren</button>
+    <button id="tab-books">Her books</button>
   </div>
   <div id="list"></div>
   <footer>

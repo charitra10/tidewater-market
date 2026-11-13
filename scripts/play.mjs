@@ -296,6 +296,62 @@ if ((await api("/api/market?player=" + me)).dealer) {
   }
 }
 
+// Maren's money business: a loan of a tool (half of what she pays me goes to
+// it), paid off; a stake in her shop (an IOU); storm cover on my pickaxe.
+// (Views read finalised blocks, a moment behind each transaction: wait for the change to show.)
+const settledView = async (read, ok) => {
+  for (let i = 0; i < 10; i++) {
+    const v = await read();
+    if (ok(v)) return v;
+    await sleep(1000);
+  }
+  return read();
+};
+console.log(`\n▸ Maren lends, takes stakes and sells storm cover`);
+let mk = await api("/api/market?player=" + me);
+if (mk.shops?.maren?.closed) console.log("  (her stall is shut: skipping)");
+else {
+  // a loan, if she has a pickaxe to spare
+  if (mk.stock.pickaxe >= 2 && (await player()).reputation >= 0) {
+    const loan = (await call("borrow", { token_id: "pickaxe" })).value;
+    say("me", `borrowed a pickaxe: I owe her ${yoctoToCoins(loan.owed).toFixed(0)} within two hours`);
+    await waitEnergy(2);
+    await forage("cliffs", 1);
+    const before = await settledView(player, (q) => q.loan);
+    const ore = have(before, "ore");
+    if (ore > 0) {
+      const deal = await trade("buy", "ore", ore);
+      const after = await settledView(player, (q) => q.loan && q.loan.repaid !== before.loan.repaid);
+      const withheld = yoctoToCoins(after.loan?.repaid ?? "0") - yoctoToCoins(before.loan.repaid);
+      check(deal && Math.abs(withheld - deal.coins / 2) <= 0.01, `sold her ${ore} ore for ${deal?.coins}: she kept ${withheld.toFixed(1)} of it for the loan`);
+    }
+    const owing = await player();
+    const left = yoctoToCoins(owing.loan.owed) - yoctoToCoins(owing.loan.repaid);
+    if ((await coins()) >= left + 1) {
+      await call("repay_loan", {}, coinsToYocto(Math.ceil(left)));
+      const paid = await settledView(player, (q) => !q.loan);
+      const rep = await near.view(cfg.contract, "get_reputation", { account_id: me });
+      check(!paid.loan && rep.loans_repaid === 1, `paid off the rest (${left.toFixed(1)}); the village remembers (name: ${rep.score})`);
+    } else console.log(`  (not enough coins to pay off the last ${left.toFixed(1)}: the loan stays, and she will call it in)`);
+  } else console.log("  (she has no pickaxe to spare, or does not trust me: no loan)");
+  // a stake: an IOU worth 120% of it
+  if ((await coins()) >= 21) {
+    mk = await api("/api/market?player=" + me);
+    const purseBefore = mk.treasury;
+    const iou = (await call("invest", { merchant: "maren" }, coinsToYocto(20))).value;
+    say("me", `invested 20 coins in Maren for an IOU worth ${yoctoToCoins(iou.owed)}`);
+    const ious = await settledView(() => near.view(cfg.contract, "get_ious", { merchant: "maren" }), (l) => l.some((x) => x.id === iou.id));
+    check(ious.some((x) => x.id === iou.id && x.investor === me) && yoctoToCoins(iou.owed) === 24, "my IOU is in her books, worth 24, behind anyone who backed her before me");
+  }
+  // storm cover, before the next storm
+  const st = stormAt(Date.now());
+  p = await player();
+  if (!st.active && st.startMs - Date.now() > 20_000 && have(p, "pickaxe") > 0 && (await coins()) >= 16) {
+    const cover = (await call("insure", {}, coinsToYocto(15))).value;
+    check(cover.storm_starts_ms === st.startMs, `covered my pickaxe for the storm at ${new Date(cover.storm_starts_ms).toISOString().slice(11, 16)} UTC, for 15 coins`);
+  } else console.log("  (no storm cover: a storm is close, or no pickaxe or coins)");
+}
+
 if (FULL) {
   console.log(`\n▸ The long game: ore → boat → pearls → beacon → lighthouse`);
   for (let i = 0; i < 200; i++) {

@@ -125,6 +125,10 @@ const LINES = {
   no_stock: [(c) => `I'm clean out of ${NAMES[c.token][1]}. Bring me the makings and I'll have one on the shelf soon.`],
   no_goods: [(c) => `You don't have that much ${c.token} on you.`],
   broke: [() => "I'm short of coin today. Buy something first, then I can pay you."],
+  closed: [
+    () => "The stall's shut, love. My purse is empty, and the ledger won't let me trade until someone puts money in. Look at my books if you want to help.",
+    () => "Shutters are down. No coin, no trade: that's the rule. An investor could open me up again.",
+  ],
   red_tide: [
     () => "Kelp? In a red tide? It's turned, love, every strand of it. Come back when the water's clear.",
     () => "Not a strand of kelp while the red tide's in. Nobody will touch it, not even the mainland.",
@@ -200,6 +204,7 @@ const SILAS = {
   blocked: [(c) => `The ledger won't let me do that one (${c.reason}). Rules of the harbour.`],
   no_goods: [(c) => `You haven't got that much ${c.token} on you.`],
   broke: [() => "My purse is light until the boat comes back from the city. Try Maren."],
+  closed: [() => "I'm off to the city to raise money. Back when someone backs me: the ledger won't let me trade on an empty purse."],
   wont_buy: [() => "I only deal in ore and pearls. Maren's your woman for the rest."],
   wont_sell: [() => "I don't sell, I buy. Everything I buy goes to the city."],
   cooldown: [() => "Give me a moment, I'm counting."],

@@ -16,7 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
-import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand } from "./merchant.js";
+import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand, repMood, TERMS } from "./merchant.js";
 import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
 import { tideAt, tideBidFactor, stormAt, stormBidFactor, eventAt } from "../web/tide.js";
 
@@ -74,8 +74,23 @@ const logs = {
   boardSales: [],
   dealerTrades: [],
   dealerBlocked: [],
-  seen: { trades: -1, blocked: -1, beacons: "", board: -1, boardSales: -1, dealerTrades: -1, dealerBlocked: -1 },
+  ious: { maren: [], silas: [] }, // investors' open IOUs, oldest first
+  loans: [], // tools Maren has out on loan
+  shopNews: [], // when a merchant shut up shop or opened again
+  seen: { trades: -1, blocked: -1, beacons: "", board: -1, boardSales: -1, dealerTrades: -1, dealerBlocked: -1, maren: "", silas: "", loans: -1 },
 };
+/// The contract's shop view, in coins.
+const shopOf = (v) =>
+  v && {
+    closed: v.closed,
+    closedAtMs: v.closed_at_ms,
+    closures: v.closures,
+    outstanding: yoctoToCoins(v.outstanding),
+    invested: yoctoToCoins(v.invested),
+    repaid: yoctoToCoins(v.repaid),
+    iouCount: v.iou_count,
+  };
+const iouOf = (i) => ({ id: i.id, investor: i.investor, putIn: yoctoToCoins(i.put_in), owed: yoctoToCoins(i.owed), repaid: yoctoToCoins(i.repaid), at: i.at_ms });
 const toListing = (l) => ({
   id: l.id,
   seller: l.seller,
@@ -99,6 +114,16 @@ async function refreshLogs(mv, dv) {
   }
   if (mv.board_sale_count !== undefined && mv.board_sale_count !== logs.seen.boardSales) {
     jobs.push(near.view(CONTRACT, "get_board_sales", { limit: 12 }).then((b) => ((logs.boardSales = b), (logs.seen.boardSales = mv.board_sale_count))));
+  }
+  // investors' IOUs, read again only when a stake or a repayment moves them
+  for (const [who, shop] of [["maren", mv.shop], ["silas", dv?.shop]]) {
+    const key = shop ? `${shop.iou_count}:${shop.invested}:${shop.repaid}` : "";
+    if (shop && key !== logs.seen[who]) {
+      jobs.push(near.view(CONTRACT, "get_ious", { merchant: who }).then((l) => ((logs.ious[who] = l.map(iouOf)), (logs.seen[who] = key))));
+    }
+  }
+  if (mv.loans_out !== undefined && mv.loans_out !== logs.seen.loans) {
+    jobs.push(near.view(CONTRACT, "get_loans").then((l) => ((logs.loans = l), (logs.seen.loans = mv.loans_out))));
   }
   if (mv.trade_count !== logs.seen.trades) {
     jobs.push(near.view(CONTRACT, "get_trades", { limit: 40 }).then((t) => ((logs.trades = t), (logs.seen.trades = mv.trade_count))));
@@ -142,6 +167,8 @@ function feed() {
       at: b.timestamp_ms,
     })),
     ...logs.listings.map((l) => ({ kind: "listed", player: l.seller, token: l.token, qty: l.qty, unit: l.unit, at: l.listedMs })),
+    ...["maren", "silas"].flatMap((m) => logs.ious[m].map((i) => ({ kind: "invest", merchant: m, player: i.investor, coins: Math.round(i.putIn), at: i.at }))),
+    ...logs.shopNews,
   ];
   return items.sort((a, b) => b.at - a.at).slice(0, 20);
 }
@@ -214,6 +241,9 @@ async function getMarket(fresh = false) {
     storm: stormAt(Date.now()),
     event: eventAt(Date.now()),
     recent: tallyDemand(),
+    shop: shopOf(mv.shop),
+    insurance: mv.insurance && { premiums: yoctoToCoins(mv.insurance.premiums), payouts: yoctoToCoins(mv.insurance.payouts), coversSold: mv.insurance.covers_sold, claimsPaid: mv.insurance.claims_paid },
+    loansOut: mv.loans_out ?? 0,
     dealer: dv && {
       id: dv.account_id,
       stock: byToken(dv.stock),
@@ -226,12 +256,33 @@ async function getMarket(fresh = false) {
       profit: yoctoToCoins(dv.profit_yocto.replace("-", "")) * (dv.profit_yocto.startsWith("-") ? -1 : 1),
       tradeCount: dv.trade_count,
       blockedCount: dv.blocked_count,
+      shop: shopOf(dv.shop),
     },
   };
+  noteShops(market);
   if (market.dealer) Object.assign(market.dealer, { tide: market.tide, storm: market.storm });
   remember(market);
   cache = { at: Date.now(), market };
   return market;
+}
+
+/// Say so when a merchant shuts up shop or opens again (news at the stall, and the ticker).
+const shutState = { maren: null, silas: null };
+function noteShops(market) {
+  for (const [who, shop] of [["maren", market.shop], ["silas", market.dealer?.shop]]) {
+    if (!shop) continue;
+    const was = shutState[who];
+    shutState[who] = shop.closed;
+    if (was === null || was === shop.closed) continue;
+    const name = who === "silas" ? "Silas" : "Maren";
+    addNews(
+      shop.closed
+        ? `${name}'s purse is empty: ${who === "silas" ? "he has gone to the city to raise money" : "she has shut her stall"}. An investor could open it again.`
+        : `${name} is open for business again.`,
+    );
+    logs.shopNews.unshift({ kind: "shop", merchant: who, player: who === "silas" ? DEALER_ID : MERCHANT_ID, closed: shop.closed, at: Date.now() });
+    logs.shopNews.length = Math.min(logs.shopNews.length, 4);
+  }
 }
 
 const merchantCall = (method, args) =>
@@ -282,10 +333,20 @@ async function workshopTick() {
   try {
     let market = await getMarket(true);
     if (market.frozen) return;
-    const silasIn = dealerHere(market);
+    // overdue loans are called in (the tool comes back, or is written off), shut or not
+    for (const l of logs.loans.filter((x) => Date.now() > x.due_ms + 5000).slice(0, 2)) {
+      const r = await tryCall("call in", merchantCall("call_in_loan", { player: l.player }));
+      if (r) addNews(`Maren called in ${whoName(l.player)}'s overdue loan: ${r.value === "repossessed" ? `she took the ${l.token_id} back` : "the tool was gone, so she wrote it off"}.`);
+    }
+    const silasIn = dealerHere(market) && !market.dealer.shop?.closed;
+    if (market.shop?.closed) {
+      // her stall is shut: no notices, no workshop, no buying; Silas may still trade
+      if (silasIn) await dealerTick(market);
+      return;
+    }
     // notices nobody took come down, so the goods can be exported or shipped after all
     for (const l of staleNotices(logs.listings, MERCHANT_ID, Date.now())) await tryCall("take down", merchantCall("cancel_listing", { id: l.id }));
-    if (silasIn) for (const l of staleNotices(logs.listings, DEALER_ID, Date.now())) await tryCall("take down", dealerCall("cancel_listing", { id: l.id }));
+    if (dealerHere(market)) for (const l of staleNotices(logs.listings, DEALER_ID, Date.now())) await tryCall("take down", dealerCall("cancel_listing", { id: l.id }));
     // Maren offers surplus ore and pearls to Silas when he pays more than the mainland
     if (silasIn) {
       for (const n of marenNotices(market, promisedBy(logs.listings, MERCHANT_ID, Date.now()))) {
@@ -400,6 +461,7 @@ async function haggleApi(body) {
 
   if (silas && !dealerHere(market)) throw httpError(400, "Silas is not in town");
   if (market.frozen) return reply(line("frozen"));
+  if ((silas ? market.dealer.shop : market.shop)?.closed) return reply(line("closed"));
 
   let action = body.action;
   let text = "";
@@ -413,6 +475,11 @@ async function haggleApi(body) {
     if (Date.now() < me.coolUntil) return reply(line("cooldown"));
     const pv = await near.view(CONTRACT, "get_player", { account_id: player });
     if (!pv) throw httpError(400, "Join the game first");
+    // the first time she sees you, your name in the village sets her mood
+    if (!me.seeded) {
+      me.mood = repMood(pv.reputation ?? 0);
+      me.seeded = true;
+    }
     let s;
     let kind;
     if (silas) {
@@ -453,7 +520,7 @@ async function haggleApi(body) {
       weather = tideBidFactor(token, market.tide);
     }
     if (why && weather !== 1) kind = weather < 1 ? "open_buy_tide_cheap" : "open_buy_tide_dear";
-    return reply(await say(kind, { token, qty, price: s.counter, why }, "", who), { why: haggleWhy("open", s, { trades: pv.trades, who }) });
+    return reply(await say(kind, { token, qty, price: s.counter, why }, "", who), { why: haggleWhy("open", { ...s, reputation: pv.reputation }, { trades: pv.trades, who }) });
   }
 
   if (action === "say") {
@@ -472,6 +539,8 @@ async function haggleApi(body) {
   const res = haggle(me.session, move);
   me.session = res.session;
   me.mood = clampMood(res.session.mood);
+  // an insult goes in Maren's ledger (word gets around, so Silas's too); not awaited
+  if (res.kind === "insulted") tryCall("note insult", merchantCall("note_insult", { player }));
   const ctx = { token: res.session.token, qty: res.session.qty, price: res.price };
 
   if (res.kind === "deal") {
@@ -627,6 +696,14 @@ async function route(req, res) {
         tide: market.tide,
         storm: market.storm,
         event: market.event,
+        shops: {
+          maren: market.shop && { ...market.shop, ious: logs.ious.maren },
+          silas: dealerHere(market) && market.dealer.shop ? { ...market.dealer.shop, ious: logs.ious.silas } : null,
+        },
+        insurance: market.insurance,
+        loansOut: market.loansOut,
+        ceiling: market.ceiling, // (a tool on loan costs its ceiling plus interest)
+        terms: TERMS,
         now: Date.now(), // so the browser's tide clock agrees with hers
       });
     }
