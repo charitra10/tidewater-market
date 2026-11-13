@@ -66,6 +66,22 @@ pub const SPOTS: [(&str, u32, Option<usize>); 3] = [
 /// Chance (in percent) that a pickaxe breaks on a cliffs run.
 pub const PICKAXE_BREAK_PCT: u8 = 12;
 
+/// The tide turns on the block clock: one full tide every `TIDE_PERIOD_MS`,
+/// in four equal parts. It needs no state, so anyone can work it out.
+pub const TIDE_PERIOD_MS: u64 = 10 * 60 * 1000;
+pub const TIDE_PHASES: [&str; 4] = ["low", "rising", "high", "falling"];
+pub const LOW: usize = 0;
+pub const HIGH: usize = 2;
+/// Every third tide is a spring tide: lower lows and higher highs.
+pub const SPRING_EVERY: u64 = 3;
+
+/// The tide at a moment: (phase index into `TIDE_PHASES`, spring tide?).
+pub fn tide_at(ms: u64) -> (usize, bool) {
+    let phase = ((ms % TIDE_PERIOD_MS) * 4 / TIDE_PERIOD_MS) as usize;
+    let spring = (ms / TIDE_PERIOD_MS) % SPRING_EVERY == 0;
+    (phase, spring)
+}
+
 pub const MAX_TRADES: usize = 40;
 pub const MAX_BLOCKED: usize = 30;
 pub const MAX_KEEPERS: usize = 50;
@@ -279,6 +295,18 @@ pub struct ForageResult {
     pub found: Vec<u32>,
     pub tool_broke: bool,
     pub energy_left: u32,
+    /// The tide when you went: "low", "rising", "high" or "falling".
+    pub tide: String,
+    pub spring: bool,
+}
+
+#[near(serializers = [json])]
+pub struct TideView {
+    pub phase: String,
+    pub spring: bool,
+    /// When this part of the tide ends (block time, ms).
+    pub phase_ends_ms: u64,
+    pub now_ms: u64,
 }
 
 #[near(contract_state)]
@@ -537,24 +565,35 @@ impl Market {
 
         let mut found = [0u32; N];
         let mut tool_broke = false;
+        let (phase, spring) = tide_at(env::block_timestamp_ms());
+        let (a, b) = (r[0] as u32, r[1] as u32);
         match spot.as_str() {
+            // Low water uncovers the rock pools; high water throws driftwood up the beach.
             "shore" => {
-                found[KELP] = 1 + (r[0] % 3) as u32; // 1-3
-                found[DRIFTWOOD] = (r[1] % 3) as u32; // 0-2
+                (found[KELP], found[DRIFTWOOD]) = match (phase, spring) {
+                    (LOW, false) => (2 + a % 3, b % 2), // kelp 2-4, wood 0-1
+                    (LOW, true) => (3 + a % 3, b % 2),  // kelp 3-5
+                    (HIGH, false) => (1 + a % 2, 1 + b % 3), // kelp 1-2, wood 1-3
+                    (HIGH, true) => (1 + a % 2, 2 + b % 3),  // wood 2-4
+                    _ => (1 + a % 3, b % 3),            // kelp 1-3, wood 0-2
+                };
             }
+            // The cliffs stand above the tide.
             "cliffs" => {
-                found[ORE] = 1 + (r[0] % 2) as u32; // 1-2
-                found[DRIFTWOOD] = (r[1] % 2) as u32; // 0-1
+                found[ORE] = 1 + a % 2; // 1-2
+                found[DRIFTWOOD] = b % 2; // 0-1
                 tool_broke = r[2] % 100 < PICKAXE_BREAK_PCT;
             }
+            // The reef: shallow at low water (pearls easy), deep at high water.
             _ => {
-                // reef: 0 pearls 25%, 1 pearl 50%, 2 pearls 25%
-                found[PEARL] = match r[0] % 4 {
-                    0 => 0,
-                    3 => 2,
-                    _ => 1,
+                found[PEARL] = match (phase, spring) {
+                    (LOW, false) => 1 + a % 2,       // 1-2
+                    (LOW, true) => [1, 2, 2, 3][(a % 4) as usize],
+                    (HIGH, false) => a % 2,          // 0-1
+                    (HIGH, true) => (a % 4 == 0) as u32, // mostly none
+                    _ => [0, 1, 1, 2][(a % 4) as usize],
                 };
-                found[KELP] = 1 + (r[1] % 2) as u32; // 1-2
+                found[KELP] = 1 + b % 2; // 1-2
             }
         }
         let mut minted = Vec::new();
@@ -573,15 +612,18 @@ impl Market {
         }
         let energy_left = p.energy;
         self.players.insert(id.clone(), p);
+        let tide = TIDE_PHASES[phase].to_string();
         emit_game(
             "forage",
-            json!({ "player": id, "spot": spot, "found": found.to_vec(), "tool_broke": tool_broke }),
+            json!({ "player": id, "spot": spot, "found": found.to_vec(), "tool_broke": tool_broke, "tide": tide, "spring": spring }),
         );
         ForageResult {
             spot,
             found: found.to_vec(),
             tool_broke,
             energy_left,
+            tide,
+            spring,
         }
     }
 
@@ -1137,7 +1179,25 @@ impl Market {
                 "max_per_seller": MAX_LISTINGS_PER_SELLER,
                 "listing_ttl_sec": LISTING_TTL_MS / 1000,
             },
+            "tide": {
+                "period_sec": TIDE_PERIOD_MS / 1000,
+                "phases": TIDE_PHASES,
+                "spring_every": SPRING_EVERY,
+            },
         })
+    }
+
+    /// The tide right now, by the block clock.
+    pub fn get_tide(&self) -> TideView {
+        let now = env::block_timestamp_ms();
+        let (phase, spring) = tide_at(now);
+        let quarter = TIDE_PERIOD_MS / 4;
+        TideView {
+            phase: TIDE_PHASES[phase].to_string(),
+            spring,
+            phase_ends_ms: now - now % quarter + quarter,
+            now_ms: now,
+        }
     }
 
     pub fn get_player(&self, account_id: AccountId) -> Option<PlayerView> {
@@ -1482,20 +1542,82 @@ mod tests {
         assert_eq!(m.get_market().player_count, 1);
     }
 
+    /// Forage `spot` 40 times, once per tide, always in the same part of it
+    /// (`phase` 0 low .. 3 falling) and on spring tides or ordinary ones.
+    /// The clock only moves forward, and energy refills between tides.
+    fn forage_through_tides(m: &mut Market, spot: &str, phase: u64, spring: bool) -> Vec<ForageResult> {
+        (0..40u8)
+            .map(|i| {
+                let n = m.get_player(alice()).unwrap().forages as u64;
+                let tide = SPRING_EVERY * (n + 2) + if spring { 0 } else { 1 };
+                ctx_seed(alice(), ZERO, tide * TIDE_PERIOD_MS / 1000 + phase * 150 + 7, i);
+                m.forage(spot.into())
+            })
+            .collect()
+    }
+
     #[test]
-    fn shore_forage_costs_energy_and_yields_goods() {
+    fn the_tide_turns_on_the_block_clock() {
+        // (block time in ms, part of the tide, spring?): the same table is checked in server/tide.test.js
+        for (ms, phase, spring) in [
+            (0, "low", true),
+            (149_999, "low", true),
+            (150_000, "rising", true),
+            (300_000, "high", true),
+            (450_000, "falling", true),
+            (600_000, "low", false),
+            (1_650_000, "falling", false),
+            (1_800_000, "low", true),
+        ] {
+            let (p, s) = tide_at(ms);
+            assert_eq!((TIDE_PHASES[p], s), (phase, spring), "at {ms} ms");
+        }
+        let m = setup();
+        ctx(alice(), ZERO, 1_000); // 400 s into the second tide
+        let t = m.get_tide();
+        assert_eq!((t.phase.as_str(), t.spring, t.phase_ends_ms), ("high", false, 1_050_000));
+    }
+
+    #[test]
+    fn the_shore_gives_what_the_tide_brings() {
         let mut m = setup();
-        for seed in 0..40u8 {
-            ctx_seed(alice(), ZERO, 1000 + seed as u64 * 100, seed);
-            let r = m.forage("shore".into());
-            assert!((1..=3).contains(&r.found[KELP]));
-            assert!(r.found[DRIFTWOOD] <= 2);
-            assert!(!r.tool_broke);
+        // (part of the tide, spring?, kelp, driftwood)
+        for (phase, spring, kelp, wood) in [
+            (0, false, 2..=4, 0..=1),
+            (0, true, 3..=5, 0..=1),
+            (1, false, 1..=3, 0..=2),
+            (2, false, 1..=2, 1..=3),
+            (2, true, 1..=2, 2..=4),
+            (3, true, 1..=3, 0..=2),
+        ] {
+            for r in forage_through_tides(&mut m, "shore", phase, spring) {
+                assert!(kelp.contains(&r.found[KELP]), "kelp {} at {phase}/{spring}", r.found[KELP]);
+                assert!(wood.contains(&r.found[DRIFTWOOD]), "wood {} at {phase}/{spring}", r.found[DRIFTWOOD]);
+                assert_eq!((r.tide.as_str(), r.spring), (TIDE_PHASES[phase as usize], spring));
+                assert!(!r.tool_broke);
+            }
         }
         let p = m.get_player(alice()).unwrap();
-        assert_eq!(p.forages, 40);
-        assert!(p.items[KELP] >= 40);
+        assert_eq!(p.forages, 240);
         assert_eq!(m.mt_supply("kelp".into()).unwrap().0, p.items[KELP] as u128);
+        assert_eq!(m.mt_supply("driftwood".into()).unwrap().0, p.items[DRIFTWOOD] as u128);
+    }
+
+    #[test]
+    fn the_reef_is_rich_at_low_water_and_poor_at_high() {
+        let mut m = setup();
+        give(&mut m, alice(), BOAT, 1);
+        let mut pearls = |phase, spring| -> Vec<u32> {
+            forage_through_tides(&mut m, "reef", phase, spring).iter().map(|r| r.found[PEARL]).collect()
+        };
+        let (low, spring_low, mid, high, spring_high) = (pearls(0, false), pearls(0, true), pearls(3, false), pearls(2, false), pearls(2, true));
+        assert!(low.iter().all(|p| (1..=2).contains(p)));
+        assert!(spring_low.iter().all(|p| (1..=3).contains(p)));
+        assert!(mid.iter().all(|p| *p <= 2));
+        assert!(high.iter().all(|p| *p <= 1));
+        assert!(spring_high.iter().all(|p| *p <= 1));
+        let sum = |v: &Vec<u32>| v.iter().sum::<u32>();
+        assert!(sum(&spring_low) > sum(&low) && sum(&low) > sum(&mid) && sum(&mid) > sum(&high) && sum(&high) >= sum(&spring_high));
     }
 
     #[test]
