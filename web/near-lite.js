@@ -198,8 +198,11 @@ function failureMessage(failure) {
 
 // ---------- RPC client ----------
 export class Near {
-  constructor(rpcUrls) {
+  /// `timeoutMs`: how long to wait for a server before trying the next one
+  /// (a transaction gets twice as long, and is then looked up, never re-sent).
+  constructor(rpcUrls, { timeoutMs = 10_000 } = {}) {
     this.urls = rpcUrls; // the first one is preferred; the rest are fallbacks
+    this.timeoutMs = timeoutMs;
     this.idx = 0;
     this.failedOverAt = 0;
     this.queues = new Map(); // one transaction at a time per signer (nonces)
@@ -219,6 +222,8 @@ export class Near {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ jsonrpc: "2.0", id: "tw", method, params }),
+          // a server that takes the request and never answers must not hang the game
+          signal: AbortSignal.timeout(method === "send_tx" ? this.timeoutMs * 2 : this.timeoutMs),
         });
         if (!res.ok) throw new Error("RPC HTTP " + res.status);
         const j = await res.json();
@@ -235,6 +240,13 @@ export class Near {
         return j.result;
       } catch (e) {
         if (e.fatal) throw e;
+        if (method === "send_tx" && e.name === "TimeoutError") {
+          // No answer is not a "no": the transaction may still land. The caller
+          // looks it up by hash instead of sending it twice.
+          const t = new ChainError("TIMEOUT: the network did not answer in time", null);
+          t.rpcName = "TIMEOUT";
+          throw t;
+        }
         lastErr = e;
         await new Promise((r) => setTimeout(r, Math.min(3000, 300 * (i + 1))));
       }
