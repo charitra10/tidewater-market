@@ -4,9 +4,9 @@
 // in this browser with a guest key that never leaves it. The player just sees
 // a short "Combing the shore..." while it lands.
 
-import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins } from "./near-lite.js";
+import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "./near-lite.js";
 import { TOKENS, NAMES, BLURB, ICONS } from "./icons.js";
-import { W, H, HOTSPOTS, walkable, drawWorld } from "./world.js";
+import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld } from "./world.js";
 
 const $ = (id) => document.getElementById(id);
 const RESERVE = 10n ** 23n; // 0.1 NEAR kept back for network fees, not shown as coins
@@ -22,6 +22,8 @@ const S = {
   near: null,
   busyText: "",
   shopOpen: false,
+  boardOpen: false,
+  board: [], // notices on the board (drawn as paper notes)
   hasBoat: false,
   atSea: 0,
   night: false,
@@ -98,8 +100,12 @@ function who(account) {
   const g = account.match(/^g([0-9a-f]{4})[0-9a-f]*\./);
   return g ? `Guest ${g[1]}` : account.split(".")[0];
 }
+const noticeOf = (seller) => (mine(seller) ? "your notice" : `${who(seller)}'s notice`);
 const MANY = { kelp: "kelp", driftwood: "driftwood", ore: "ore", pearl: "pearls", rope: "rope", pickaxe: "pickaxes", boat: "boats", beacon: "beacon lenses" };
 const lot = (token, n) => (n === 1 ? (["kelp", "driftwood", "ore", "rope"].includes(token) ? "1 " : "a ") + NAMES[token].toLowerCase() : `${n} ${MANY[token]}`);
+const yourLot = (token, n) => (n === 1 ? NAMES[token].toLowerCase() : `${n} ${MANY[token]}`);
+const fmt = (c) => String(Math.round(c * 10) / 10); // coins, at most one decimal
+const RAW = ["kelp", "driftwood", "ore", "pearl"];
 function ago(ms) {
   const s = Math.max(0, (Date.now() - ms) / 1000);
   if (s < 60) return "just now";
@@ -110,6 +116,12 @@ function ago(ms) {
 function eventText(e) {
   const name = who(e.player);
   if (e.kind === "trade") return `${name} ${e.did} ${lot(e.token, e.qty)} ${e.did === "sold" ? "to" : "from"} Maren for ${e.coins} coins`;
+  if (e.kind === "board_sale") {
+    const buyer = e.maren ? "Maren" : name;
+    if (mine(e.seller)) return `${buyer} bought your ${yourLot(e.token, e.qty)} off the notice board for ${e.coins} coins`;
+    return `${buyer} bought ${lot(e.token, e.qty)} off ${noticeOf(e.seller)} for ${e.coins} coins`;
+  }
+  if (e.kind === "listed") return `${name} pinned ${lot(e.token, e.qty)} on the notice board at ${fmt(e.unit)} each`;
   if (e.kind === "refused") {
     // a price outside her floors and ceilings only comes from someone trying to trick her
     if (/floor|ceiling/.test(e.reason)) return `${name} tried to talk Maren into a silly deal. The ledger refused it.`;
@@ -161,7 +173,10 @@ const keeperRows = (list) =>
 
 /// The title screen: how busy the market is and who has relit the lighthouse.
 function renderBoard(m) {
-  $("stats").textContent = `${m.players} ${m.players === 1 ? "person has" : "people have"} come ashore · ${m.deals} ${m.deals === 1 ? "deal" : "deals"} struck with Maren`;
+  const up = (m.notices?.listings ?? []).filter((l) => l.expiresMs > Date.now()).length;
+  $("stats").textContent =
+    `${m.players} ${m.players === 1 ? "person has" : "people have"} come ashore · ${m.deals} ${m.deals === 1 ? "deal" : "deals"} struck with Maren` +
+    (up ? ` · ${up} ${up === 1 ? "notice" : "notices"} on the board` : "");
   $("title-keepers").innerHTML = m.keepers.length ? keeperRows(m.keepers) : `<tr><td>Nobody has relit it yet. It could be you.</td></tr>`;
   $("board").hidden = false;
 }
@@ -237,13 +252,13 @@ function energyNow() {
 }
 
 let refreshing = null;
-function refresh() {
+function refresh(fresh = false) {
   refreshing ??= (async () => {
     try {
       const [p, bal, market] = await Promise.all([
         near.view(cfg.contract, "get_player", { account_id: me }),
         near.balance(me),
-        api("/api/market?player=" + me).catch(() => S.market),
+        api(`/api/market?player=${me}${fresh ? "&fresh=1" : ""}`).catch(() => S.market),
       ]);
       if (p) {
         const before = pv;
@@ -257,9 +272,12 @@ function refresh() {
       if (bal > 0n && !settling) coins = Math.max(0, Math.floor(yoctoToCoins(bal > RESERVE ? bal - RESERVE : 0n)));
       else setTimeout(refresh, settling ? 2600 : 1500); // (a brand-new account can also take a moment to show up)
       S.market = market;
+      S.board = (market?.notices?.listings ?? []).filter((l) => l.expiresMs > Date.now());
+      tellSellerNews();
       renderHud();
       updateTicker();
       if (S.shopOpen) renderShop();
+      if (S.boardOpen) renderNotices();
     } catch (e) {
       console.warn("refresh:", e.message);
     } finally {
@@ -390,6 +408,9 @@ async function lighthouse() {
     const keepers = await near.view(cfg.contract, "get_keepers").catch(() => []);
     $("win-text").textContent = `You relit the lighthouse in ${clock(k.took_ms)}, with ${k.forages} trips out and ${k.trades} deals struck. Maren says she never doubted you.`;
     $("keepers").innerHTML = keeperRows(keepers.slice(0, 5));
+    const tools = ["boat", "pickaxe"].filter((t) => pv.items[idx(t)] > 0);
+    $("win-pass").hidden = !tools.length;
+    $("win-pass").textContent = `Your ${tools.map((t) => NAMES[t].toLowerCase()).join(" and ")} could start a newcomer off: pin ${tools.length > 1 ? "them" : "it"} on the notice board by the cottage.`;
     $("win").hidden = false;
   } catch (e) {
     toast(e.message, true);
@@ -403,6 +424,7 @@ function interact(id) {
   if (busy || !started) return;
   const h = HOTSPOTS.find((s) => s.id === id);
   if (id === "stall") openShop();
+  else if (id === "board") openNotices();
   else if (id === "lighthouse") lighthouse();
   else forage(h);
 }
@@ -467,6 +489,8 @@ function renderShop() {
           .map(([t, n]) => `<span class="need ${m.stock[t] >= n ? "ok" : "short"}">${ICONS[t]}${Math.min(m.stock[t], n)}/${n}</span>`)
           .join("");
         sub = `Sold out. To make one she needs ${needs}`;
+        const used = cheapestNotice(w.token);
+        if (used) sub += ` <b>${who(used.seller)} has one on the notice board for ${fmt(used.unit)}.</b>`;
       } else sub = `${w.stock} on the shelf. ${sub}`;
       if (mine > 0) sub += ` <b>You have ${mine}.</b>`;
       html += `<div class="item">${ICONS[w.token]}<div><div class="name">${NAMES[w.token]}${trend(w.token, false)}</div><div class="sub">${sub}</div></div>
@@ -483,6 +507,7 @@ function renderShop() {
             : ""
         }</div></div>`;
     }
+    html += `<p class="sub board-hint">Want more than she pays? Pin your goods on the notice board by the cottage, at your own price.</p>`;
   }
   if (html !== lastList) {
     $("list").innerHTML = html;
@@ -557,6 +582,213 @@ async function settle(deal) {
   }
 }
 
+// ---------- the notice board: players sell to players ----------
+let ntab = "buy";
+const buyQty = {}; // notice id -> how many to buy
+const pin = { token: null, qty: 1, price: 1 };
+let lastNotices = "";
+
+const marenAsk = (token) => S.market?.board?.sells.find((w) => w.token === token)?.price ?? null;
+const marenBid = (token) => S.market?.history?.prices?.[token]?.at(-1) ?? S.market?.board?.buys.find((b) => b.token === token)?.price ?? 0;
+const live = (l) => l.expiresMs > Date.now();
+function cheapestNotice(token) {
+  return S.board.filter((l) => l.token === token && !mine(l.seller)).sort((a, b) => a.unit - b.unit)[0];
+}
+
+function openNotices() {
+  if (S.shopOpen) closeShop();
+  S.boardOpen = true;
+  document.body.classList.add("board-open"); // the panel covers the ticker's corner
+  target = null;
+  ntab = S.board.some((l) => !mine(l.seller)) ? "buy" : "pin";
+  $("notices").hidden = false;
+  lastNotices = "";
+  renderNotices();
+  refresh();
+}
+function closeNotices() {
+  S.boardOpen = false;
+  document.body.classList.remove("board-open");
+  $("notices").hidden = true;
+}
+
+/// One notice in the "For sale" list.
+function noticeRow(l) {
+  const yours = mine(l.seller);
+  const q = Math.max(1, Math.min(l.qty, buyQty[l.id] ?? l.qty));
+  const total = l.unit * q;
+  let compare;
+  if (RAW.includes(l.token)) compare = `Maren pays about ${fmt(marenBid(l.token))}`;
+  else {
+    const ask = marenAsk(l.token);
+    compare = ask === null ? `<span class="good">Maren is sold out</span>` : l.unit < ask ? `<span class="good">Maren asks ${ask}</span>` : `Maren asks ${ask}`;
+  }
+  const when = live(l) ? ago(l.listedMs) : "expired";
+  let right;
+  if (yours) right = `<button class="btn plain small" data-cancel="${l.id}">Take down</button>`;
+  else if (!live(l)) right = `<span class="sub">expired</span>`;
+  else {
+    const stepper = l.qty > 1 ? `<span class="qty"><button data-bq="${l.id}" data-d="-1">−</button>${q}<button data-bq="${l.id}" data-d="1">+</button></span>` : "";
+    right = `${stepper}<button class="btn small" data-buy="${l.id}" data-qty="${q}" ${total > coins ? "disabled title='Not enough coins'" : ""}>Buy for ${fmt(total)}</button>`;
+  }
+  return `<div class="item${yours ? " yours" : ""}">${ICONS[l.token]}<div><div class="name">${l.qty} × ${NAMES[l.token]} <span class="each">${fmt(l.unit)} each</span></div>
+    <div class="sub">${yours ? "<b>Your notice</b>" : who(l.seller)} · ${when} · ${compare}</div></div><div class="buy">${right}</div></div>`;
+}
+
+function renderNotices() {
+  const m = S.market;
+  if (!m || !pv) return;
+  const all = m.notices?.listings ?? [];
+  const others = all.filter((l) => !mine(l.seller) && live(l)).sort((a, b) => b.listedMs - a.listedMs);
+  const mineNow = all.filter((l) => mine(l.seller));
+  const maxMine = rules.board?.max_per_seller ?? 3;
+  $("n-coins").textContent = `you have ${coins} coins`;
+  $("ntab-buy").textContent = `For sale${others.length ? ` (${others.length})` : ""}`;
+  $("ntab-buy").classList.toggle("on", ntab === "buy");
+  $("ntab-pin").classList.toggle("on", ntab === "pin");
+  $("notice-list").hidden = ntab !== "buy";
+  $("pin").hidden = ntab !== "pin";
+
+  let html = "";
+  if (ntab === "buy") {
+    html = others.map(noticeRow).join("");
+    if (!others.length) html = mineNow.length ? `<p class="empty">No one else is selling anything right now.</p>` : `<p class="empty">No one is selling anything right now. Pin the first notice: a spare tool, or goods at your own price.</p>`;
+    if (mineNow.length) html += `<h4>Your notices</h4>` + mineNow.map(noticeRow).join("");
+  } else {
+    const bag = SLOTS.filter((t) => pv.items[idx(t)] > 0);
+    if (pin.token && !bag.includes(pin.token)) pin.token = null;
+    if (!pin.token && bag.length) pinDefaults(bag[0]); // start with a filled-in notice, not an empty form
+    html = `<div class="field"><label>What</label><div class="chips">${
+      bag.map((t) => `<button class="pick${pin.token === t ? " on" : ""}" data-pin="${t}" title="${NAMES[t]}">${ICONS[t]}<b>${pv.items[idx(t)]}</b></button>`).join("") ||
+      `<span class="sub">Your bag is empty. Comb the shore first.</span>`
+    }</div></div>`;
+    if (pin.token) {
+      const have = pv.items[idx(pin.token)];
+      pin.qty = Math.max(1, Math.min(have, pin.qty));
+      html += `<div class="field"><label>How many</label><span class="qty"><button data-pq="-1">−</button>${pin.qty}<button data-pq="1">+</button></span><span class="sub">of ${have}</span></div>
+        <div class="field"><label>Price each</label><button class="step" data-pp="-1">−</button><input id="pin-price" type="number" min="1" inputmode="numeric" value="${pin.price}"><button class="step" data-pp="1">+</button><span class="sub">coins</span></div>
+        <p class="sub" id="pin-sum">${pinSummary()}</p>`;
+    }
+    const full = mineNow.length >= maxMine;
+    html += `<button class="btn" data-pin-go ${!pin.token || full || busy ? "disabled" : ""}>Pin it to the board</button>
+      <p class="sub">${full ? `You have ${maxMine} notices up, the most allowed. Take one down to pin another.` : `Your goods wait on the board, not in your bag, until they sell. Notices last a day; take yours down any time.`}</p>`;
+    if (mineNow.length) html += `<h4>Your notices (${mineNow.length} of ${maxMine})</h4>` + mineNow.map(noticeRow).join("");
+  }
+  // re-render only when something changed, and never under a price being typed
+  const key = html + ntab;
+  if (key !== lastNotices && document.activeElement?.id !== "pin-price") {
+    (ntab === "buy" ? $("notice-list") : $("pin")).innerHTML = html;
+    lastNotices = key;
+  } else if ($("pin-sum") && pin.token) $("pin-sum").innerHTML = pinSummary();
+  const sales = (m.notices?.sales ?? []).slice(0, 3);
+  $("board-sales").innerHTML = sales.length
+    ? sales.map((b) => `<li>${b.maren ? "Maren" : who(b.buyer)} bought ${lot(b.token_id, b.qty)} off ${noticeOf(b.seller)} for ${Math.round(yoctoToCoins(b.total))} coins.</li>`).join("")
+    : `<li>No sales off the board yet.</li>`;
+}
+
+function pinSummary() {
+  const bid = marenBid(pin.token);
+  const ask = marenAsk(pin.token);
+  let hint;
+  if (RAW.includes(pin.token)) {
+    hint =
+      pin.price <= bid
+        ? `That is no more than Maren pays (about ${fmt(bid)}), so she will probably buy it herself within a minute or two.`
+        : `Maren pays about ${fmt(bid)} each. Another player may pay your price, or Maren will once her own price climbs to it.`;
+  } else {
+    hint = `${ask === null ? "Maren is sold out of these" : `Maren sells these for ${ask}`}. When she runs short she buys used ones too, but only cheaply.`;
+  }
+  return `${pin.qty} × ${NAMES[pin.token].toLowerCase()} at ${pin.price} each: <b>${pin.qty * pin.price} coins</b> if it all sells. ${hint}`;
+}
+
+function pinDefaults(token) {
+  pin.token = token;
+  pin.qty = pv.items[idx(token)];
+  if (RAW.includes(token)) pin.price = Math.max(1, Math.round(marenBid(token) * 1.3));
+  else pin.price = Math.max(1, Math.round((marenAsk(token) ?? S.market?.value?.[token] ?? 10) * 0.85));
+  if (!RAW.includes(token)) pin.qty = 1;
+}
+
+async function boardTx(text, method, args, deposit, label) {
+  if (busy) return null;
+  busy = true;
+  S.busyText = text;
+  renderNotices();
+  try {
+    return await call(method, args, deposit, label);
+  } catch (e) {
+    toast(e.message, true);
+    return null;
+  } finally {
+    S.busyText = "";
+    busy = false;
+    setTimeout(() => refresh(true), 700); // the server re-reads the board at most once a second
+  }
+}
+
+async function pinNotice() {
+  const { token, qty, price } = pin;
+  if (!token || !(price >= 1)) return;
+  const res = await boardTx("Pinning a notice", "list_item", { token_id: token, qty, unit_price: coinsToYocto(price).toString() }, 0n, `Pinned ${lot(token, qty)} at ${price} each`);
+  if (!res) return;
+  sfx.found();
+  toast(`Pinned on the board: ${lot(token, qty)} at ${price} coins each.`);
+  pv.items[idx(token)] -= qty; // shown at once; the chain confirms in a moment
+  S.market.notices.listings.push(toNotice(res.value));
+  pin.token = null;
+  ntab = "buy";
+  renderHud();
+  renderNotices();
+}
+const toNotice = (l) => ({ id: l.id, seller: l.seller, token: l.token_id, qty: l.qty, unit: yoctoToCoins(l.unit_price), unitYocto: l.unit_price, listedMs: l.listed_ms, expiresMs: l.expires_ms });
+
+async function buyNotice(id, qty) {
+  const l = (S.market.notices?.listings ?? []).find((x) => x.id === id);
+  if (!l) return;
+  const total = l.unit * qty;
+  if (total > coins) return toast(`That costs ${fmt(total)} coins and you have ${coins}.`, true);
+  const what = lot(l.token, qty);
+  const res = await boardTx("Counting out coins", "buy_listing", { id, qty }, BigInt(l.unitYocto) * BigInt(qty), `Bought ${what} off the board for ${fmt(total)}`);
+  if (!res) return;
+  coins = Math.max(0, Math.floor(coins - total));
+  sfx.coin();
+  toast(`Bought ${what} from ${who(l.seller)} for ${fmt(total)} coins. The coins went straight to them.`);
+  float(`−${fmt(total)}`, "coin");
+  float(`+${yourLot(l.token, qty)}`, l.token, { wait: 0.35 });
+  l.qty -= qty;
+  if (l.qty <= 0) S.market.notices.listings = S.market.notices.listings.filter((x) => x.id !== id);
+  delete buyQty[id];
+  renderHud();
+  renderNotices();
+}
+
+async function takeDown(id) {
+  const l = (S.market.notices?.listings ?? []).find((x) => x.id === id);
+  if (!l) return;
+  const res = await boardTx("Taking the notice down", "cancel_listing", { id }, 0n, `Took down ${lot(l.token, l.qty)}`);
+  if (!res) return;
+  toast(`Took the notice down. ${lot(l.token, l.qty)} back in your bag.`);
+  S.market.notices.listings = S.market.notices.listings.filter((x) => x.id !== id);
+  renderNotices();
+}
+
+/// When something of yours sells off the board while you are elsewhere, say so.
+let salesSeen = null;
+function tellSellerNews() {
+  const sold = (S.market?.feed ?? []).filter((e) => e.kind === "board_sale" && mine(e.seller));
+  const newest = Math.max(0, ...sold.map((e) => e.at));
+  if (salesSeen === null) {
+    salesSeen = newest; // old news
+    return;
+  }
+  for (const e of sold.filter((e) => e.at > salesSeen).reverse()) {
+    sfx.coin();
+    toast(`${e.maren ? "Maren" : who(e.player)} bought your ${yourLot(e.token, e.qty)} off the notice board: +${e.coins} coins.`);
+    float(`+${e.coins}`, "coin");
+  }
+  salesSeen = Math.max(salesSeen, newest);
+}
+
 // ---------- the ledger panel (for the curious) ----------
 function renderLedger() {
   if (!cfg || !me) return;
@@ -587,6 +819,7 @@ addEventListener("keydown", (e) => {
     if (!$("win").hidden) $("win").hidden = true;
     else if (!$("ledger").hidden) $("ledger").hidden = true;
     else if (S.shopOpen) closeShop();
+    else if (S.boardOpen) closeNotices();
     return;
   }
   if (typingInField() || !started) return;
@@ -597,7 +830,7 @@ addEventListener("keydown", (e) => {
   }
   if ((k === "e" || k === " " || k === "enter") && !e.repeat) {
     e.preventDefault();
-    if (S.shopOpen) return;
+    if (S.shopOpen || S.boardOpen) return;
     if (S.near) interact(S.near);
   }
 });
@@ -607,6 +840,7 @@ addEventListener("blur", () => keys.clear());
 canvas.addEventListener("pointerdown", (e) => {
   if (!started || busy) return;
   if (S.shopOpen) closeShop();
+  if (S.boardOpen) closeNotices();
   const rect = canvas.getBoundingClientRect();
   const x = ((e.clientX - rect.left) * W) / rect.width;
   const y = ((e.clientY - rect.top) * H) / rect.height;
@@ -616,6 +850,7 @@ canvas.addEventListener("pointerdown", (e) => {
   if (!hit && x > 350 && x < 424 && y > 6 && y < 156) hit = HOTSPOTS.find((h) => h.id === "lighthouse");
   if (!hit && x < 236 && y > 400 && y < 620) hit = HOTSPOTS.find((h) => h.id === "reef");
   if (!hit && x > 940 && y < 250) hit = HOTSPOTS.find((h) => h.id === "cliffs");
+  if (!hit && x > BOARD_BOX.x1 && x < BOARD_BOX.x2 && y > BOARD_BOX.y1 && y < BOARD_BOX.y2) hit = HOTSPOTS.find((h) => h.id === "board");
   if (hit) target = { x: hit.x, y: hit.y, then: hit.id };
   else {
     // a click on water or rock means "as close as I can get": step back towards the player
@@ -631,6 +866,41 @@ canvas.addEventListener("pointerdown", (e) => {
 });
 
 $("shop-close").onclick = closeShop;
+$("notices-close").onclick = closeNotices;
+$("ntab-buy").onclick = () => {
+  ntab = "buy";
+  renderNotices();
+};
+$("ntab-pin").onclick = () => {
+  ntab = "pin";
+  renderNotices();
+};
+$("notices").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b || b.disabled) return;
+  const d = b.dataset;
+  if (d.pin) pinDefaults(d.pin);
+  else if (d.pq) pin.qty += Number(d.pq);
+  else if (d.pp) pin.price = Math.max(1, (Math.round(pin.price) || 1) + Number(d.pp));
+  else if (d.pinGo !== undefined) return pinNotice();
+  else if (d.bq) {
+    const l = S.market.notices.listings.find((x) => x.id === Number(d.bq));
+    buyQty[d.bq] = Math.max(1, Math.min(l.qty, (buyQty[d.bq] ?? l.qty) + Number(d.d)));
+  } else if (d.buy) return buyNotice(Number(d.buy), Number(d.qty));
+  else if (d.cancel) return takeDown(Number(d.cancel));
+  else return;
+  renderNotices();
+});
+$("notices").addEventListener("input", (e) => {
+  if (e.target.id !== "pin-price") return;
+  const v = Math.round(Number(e.target.value));
+  if (v >= 1) pin.price = v;
+  $("pin-sum").innerHTML = pinSummary();
+});
+$("notices").addEventListener("focusout", (e) => {
+  if (e.target.id === "pin-price") e.target.value = pin.price; // show the price that will be used (no re-render: a click may be on its way)
+});
+$("notices").addEventListener("keydown", (e) => e.key === "Enter" && e.target.id === "pin-price" && pinNotice());
 $("tab-buy").onclick = () => {
   tab = "buy";
   renderShop();
@@ -693,7 +963,7 @@ function frame(now) {
   const t = now / 1000;
   const p = S.player;
 
-  if (started && !busy && !S.shopOpen) {
+  if (started && !busy && !S.shopOpen && !S.boardOpen) {
     let dx = (keys.has("d") || keys.has("arrowright") ? 1 : 0) - (keys.has("a") || keys.has("arrowleft") ? 1 : 0);
     let dy = (keys.has("s") || keys.has("arrowdown") ? 1 : 0) - (keys.has("w") || keys.has("arrowup") ? 1 : 0);
     if (dx || dy) target = null;

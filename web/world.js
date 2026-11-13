@@ -14,15 +14,19 @@ const BLOCKS = [
   { x1: 726, x2: 874, y1: 318, y2: 404 }, // the stall
   { x1: 1022, x2: 1142, y1: 520, y2: 600 }, // the cottage
   { x1: 356, x2: 416, y1: 92, y2: 148 }, // the lighthouse
+  { x1: 936, x2: 1014, y1: 486, y2: 508 }, // the notice board
 ];
 
 export const HOTSPOTS = [
   { id: "shore", x: 506, y: 404, r: 72, label: "Tide pools", verb: "Comb the shore", cost: 1 },
   { id: "cliffs", x: 1046, y: 268, r: 72, label: "The cliffs", verb: "Mine the cliffs", cost: 2, tool: "pickaxe" },
   { id: "reef", x: 262, y: 560, r: 62, label: "The reef", verb: "Row out to the reef", cost: 3, tool: "boat" },
-  { id: "stall", x: 800, y: 432, r: 78, label: "Maren's stall", verb: "Talk to Maren" },
-  { id: "lighthouse", x: 424, y: 170, r: 72, label: "The old lighthouse", verb: "Climb the lighthouse" },
+  { id: "stall", x: 800, y: 432, r: 78, label: "Maren's stall", verb: "Talk to Maren", pillUp: 176 },
+  { id: "lighthouse", x: 424, y: 170, r: 72, label: "The old lighthouse", verb: "Climb the lighthouse", pillUp: 44 },
+  { id: "board", x: 975, y: 534, r: 62, label: "The notice board", verb: "Read the notice board", pillUp: 150 },
 ];
+/// Where the notice board stands (for clicks).
+export const BOARD_BOX = { x1: 930, x2: 1020, y1: 400, y2: 512 };
 
 export function shoreX(y) {
   for (let i = 0; i < SHORE.length - 1; i++) {
@@ -427,6 +431,59 @@ function drawCottage(ctx, t, night) {
   }
 }
 
+/// The notice board by the cottage: one paper note per notice, each with a
+/// little picture of what is for sale.
+function drawNoticeBoard(ctx, t, S) {
+  const x = 975;
+  const y = 506;
+  ellipse(ctx, x, y + 2, 46, 7, "rgba(30,60,30,0.2)");
+  ctx.fillStyle = "#6e5034";
+  ctx.fillRect(x - 36, y - 74, 7, 76);
+  ctx.fillRect(x + 29, y - 74, 7, 76);
+  rr(ctx, x - 42, y - 90, 84, 56, 4);
+  ctx.fillStyle = "#946a40";
+  ctx.fill();
+  rr(ctx, x - 38, y - 86, 76, 48, 3);
+  ctx.fillStyle = "#c99d68";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x - 50, y - 88);
+  ctx.lineTo(x, y - 106);
+  ctx.lineTo(x + 50, y - 88);
+  ctx.closePath();
+  ctx.fillStyle = "#b5533c";
+  ctx.fill();
+  ctx.fillStyle = "#9c452f";
+  ctx.fillRect(x - 50, y - 90, 100, 4);
+  const notes = (S.board ?? []).slice(0, 8);
+  notes.forEach((n, i) => {
+    const row = Math.floor(i / 4);
+    const nx = x - 28 + (i % 4) * 18 + (row ? 4 : 0);
+    const ny = y - 72 + row * 21;
+    const sway = Math.sin(t * 1.3 + n.id) * 0.03;
+    ctx.save();
+    ctx.translate(nx, ny);
+    ctx.rotate((((n.id * 37) % 9) - 4) * 0.035 + sway);
+    ctx.fillStyle = "rgba(60,40,20,0.25)";
+    ctx.fillRect(-6, -8, 14, 18);
+    ctx.fillStyle = "#fbf6e8";
+    ctx.fillRect(-7, -9, 14, 18);
+    const img = iconImage(n.token);
+    if (img.complete) ctx.drawImage(img, -6, -5, 12, 12);
+    ellipse(ctx, 0, -7, 1.7, 1.7, "#c0392b");
+    ctx.restore();
+  });
+  if (!notes.length) {
+    // a curling old notice, so the board does not look broken
+    ctx.save();
+    ctx.translate(x + 4, y - 63);
+    ctx.rotate(0.12);
+    ctx.fillStyle = "rgba(251,246,232,0.55)";
+    ctx.fillRect(-9, -11, 18, 22);
+    ctx.restore();
+  }
+}
+
 function drawStall(ctx, t, S) {
   const x = 800;
   ellipse(ctx, x, 406, 86, 10, "rgba(30,60,30,0.22)");
@@ -729,6 +786,7 @@ export function drawWorld(ctx, t, S) {
     { y: 150, draw: () => drawLighthouse(ctx, t, S.night) },
     { y: 404, draw: () => drawStall(ctx, t, S) },
     { y: 601, draw: () => drawCottage(ctx, t, S.night) },
+    { y: 506, draw: () => drawNoticeBoard(ctx, t, S) },
     ...TREES.map(([x, y, s]) => ({ y, draw: () => drawTree(ctx, x, y, s, t) })),
   ];
   if (!S.atSea) things.push({ y: S.player.y, draw: () => drawPlayer(ctx, S.player, t) });
@@ -786,8 +844,8 @@ export function drawWorld(ctx, t, S) {
     ctx.fillStyle = "#fff";
     ctx.textAlign = "left";
     ctx.fillText(S.busyText + dots, px - w / 2 + 12, py + 1);
-  } else if (S.near && !S.shopOpen) {
+  } else if (S.near && !S.shopOpen && !S.boardOpen) {
     const h = HOTSPOTS.find((s) => s.id === S.near);
-    pill(ctx, h.x, h.y - (h.id === "stall" ? 176 : h.id === "lighthouse" ? 44 : 62), h.verb, h.cost ? `${h.cost} energy` : "");
+    pill(ctx, h.x, h.y - (h.pillUp ?? 62), h.verb, h.cost ? `${h.cost} energy` : "");
   }
 }
