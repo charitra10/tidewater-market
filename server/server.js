@@ -17,7 +17,8 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
 import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS } from "./merchant.js";
-import { say, writtenLine, initVoice, lot } from "./voice.js";
+import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
+import { tideAt, tideBidFactor } from "../web/tide.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.join(here, "..", "web");
@@ -151,7 +152,10 @@ function remember(market) {
 }
 
 async function getMarket(fresh = false) {
-  if (cache.market && Date.now() - cache.at < (fresh ? 1000 : 3000)) return cache.market;
+  if (cache.market && Date.now() - cache.at < (fresh ? 1000 : 3000)) {
+    cache.market.tide = tideAt(Date.now()); // the tide turns between chain reads
+    return cache.market;
+  }
   const [mv, pol] = await Promise.all([near.view(CONTRACT, "get_market"), policy ?? near.view(CONTRACT, "get_policy")]);
   policy = pol;
   await refreshLogs(mv);
@@ -170,6 +174,7 @@ async function getMarket(fresh = false) {
     playerCount: mv.player_count,
     boughtInWindow: mv.window_resets_at_ms ? yoctoToCoins(mv.bought_in_window) : 0,
     windowLimit: yoctoToCoins(pol.buy_window_limit),
+    tide: tideAt(Date.now()),
   };
   remember(market);
   cache = { at: Date.now(), market };
@@ -299,7 +304,11 @@ async function haggleApi(body) {
     if (side === "sell" && market.stock[token] <= 1) kind = "open_sell_scarce";
     if (side === "buy" && market.stock[token] >= TARGET[token] * 1.5) kind = "open_buy_glut";
     if (side === "buy" && market.stock[token] < TARGET[token] * 0.5) kind = "open_buy_keen";
-    return reply(await say(kind, { token, qty, price: s.counter }));
+    // the tide is the reason a player can see, so it comes first
+    const tidal = side === "buy" ? tideBidFactor(token, market.tide) : 1;
+    const why = TIDE_WHY[market.tide.phase]?.[token];
+    if (tidal !== 1 && why) kind = tidal < 1 ? "open_buy_tide_cheap" : "open_buy_tide_dear";
+    return reply(await say(kind, { token, qty, price: s.counter, why: why ? (market.tide.spring ? `Spring tide! ${why}` : why) : undefined }));
   }
 
   if (action === "say") {
@@ -449,6 +458,8 @@ async function route(req, res) {
         deals: market.tradeCount,
         notices: { listings: logs.listings, sales: logs.boardSales.slice(0, 5).map((b) => ({ ...b, maren: b.buyer === MERCHANT_ID })) },
         value: VALUE,
+        tide: market.tide,
+        now: Date.now(), // so the browser's tide clock agrees with hers
       });
     }
     if (url.pathname === "/api/guest" && req.method === "POST") {

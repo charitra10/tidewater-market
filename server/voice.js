@@ -28,7 +28,7 @@ const pick = (list, rng) => list[Math.floor(rng() * list.length)];
 
 const LINES = {
   greet: [
-    () => "Tide's in and so am I. What'll it be?",
+    () => "Tide or no tide, the stall's open. What'll it be?",
     () => "Mind the nets. Buying or selling today?",
     () => "Ah, a customer with sand on their boots. Good sign.",
   ],
@@ -55,6 +55,15 @@ const LINES = {
   open_buy_keen: [
     (c) => `Now that I can use! ${cap(coins(c.price))} for ${lot(c.token, c.qty)}.`,
     (c) => `I've been waiting for ${c.token}. ${cap(coins(c.price))}, gladly.`,
+  ],
+  // the tide brought plenty of it in (or hid it): `c.why` says how, see TIDE_WHY
+  open_buy_tide_cheap: [
+    (c) => `${c.why}. ${cap(coins(c.price))} for ${lot(c.token, c.qty)}, and that's the going rate today.`,
+    (c) => `${c.why}, so I'm swimming in ${c.token}. ${cap(coins(c.price))}, no more.`,
+  ],
+  open_buy_tide_dear: [
+    (c) => `${c.why}. ${cap(coins(c.price))} for ${lot(c.token, c.qty)}, gladly.`,
+    (c) => `${c.why}, so I'll pay well: ${coins(c.price)}.`,
   ],
   counter: [
     (c) => `Hm. I can do ${coins(c.price)}.`,
@@ -122,6 +131,20 @@ const LINES = {
   frozen: [() => "The harbourmaster has shut my stall for now. Come back later."],
 };
 
+/// Why the tide moved her offer, by tide and good.
+export const TIDE_WHY = {
+  low: {
+    kelp: "The tide's out and half the village is knee-deep in the rock pools",
+    pearl: "The reef's half out of the water at low tide, pearls are easy pickings",
+    driftwood: "Not a stick washes up at low tide",
+  },
+  high: {
+    kelp: "The pools are under water at high tide, nobody's bringing kelp",
+    pearl: "The reef's deep at high tide, so a pearl is worth something",
+    driftwood: "High tide's throwing driftwood up all along the beach",
+  },
+};
+
 function cap(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -162,6 +185,8 @@ const DECISIONS = {
   open_buy: (c) => `Offer ${c.price} coins for the player's ${lot(c.token, c.qty)}.`,
   open_buy_glut: (c) => `Offer only ${c.price} coins for the player's ${lot(c.token, c.qty)}; you already have far too much of it.`,
   open_buy_keen: (c) => `Offer ${c.price} coins for the player's ${lot(c.token, c.qty)}; you need it badly.`,
+  open_buy_tide_cheap: (c) => `Offer only ${c.price} coins for the player's ${lot(c.token, c.qty)}, because of the tide: ${c.why.toLowerCase()}.`,
+  open_buy_tide_dear: (c) => `Offer a good ${c.price} coins for the player's ${lot(c.token, c.qty)}, because of the tide: ${c.why.toLowerCase()}.`,
   counter: (c) => `Reject their offer and counter at ${c.price} coins.`,
   close: (c) => `Their offer is close; propose meeting at ${c.price} coins.`,
   final: (c) => `Give a final, take-it-or-leave-it price of ${c.price} coins.`,

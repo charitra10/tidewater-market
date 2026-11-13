@@ -1,0 +1,128 @@
+// The tide (web/tide.js) and what it does to Maren's offers. Run: npm test
+import test from "node:test";
+import assert from "node:assert/strict";
+import { tideAt, tideHeight, nextTide, tideBidFactor, TIDE_PERIOD_MS, PHASES } from "../web/tide.js";
+import { unitBid, priceBoard, openHaggle, boardPicks, RAW } from "./merchant.js";
+import { writtenLine, TIDE_WHY } from "./voice.js";
+
+const market = (tide, over = {}) => ({
+  stock: { kelp: 3, driftwood: 4, ore: 2, pearl: 1, rope: 3, pickaxe: 2, boat: 0, beacon: 0, ...over.stock },
+  avgCost: { kelp: 3, driftwood: 4, ore: 20, pearl: 50, rope: 12, pickaxe: 40, boat: 0, beacon: 0 },
+  treasury: over.treasury ?? 1500,
+  floor: { kelp: 2, driftwood: 3, ore: 15, pearl: 40, rope: 12, pickaxe: 35, boat: 140, beacon: 350 },
+  ceiling: { kelp: 6, driftwood: 9, ore: 42, pearl: 110, rope: 24, pickaxe: 60, boat: 240, beacon: 600 },
+  tide,
+});
+const LOW = { phase: "low", spring: false };
+const HIGH = { phase: "high", spring: false };
+const SPRING_LOW = { phase: "low", spring: true };
+const SPRING_HIGH = { phase: "high", spring: true };
+
+test("the tide turns on the clock exactly as the contract says", () => {
+  // the same table as `the_tide_turns_on_the_block_clock` in contract/src/lib.rs
+  for (const [ms, phase, spring] of [
+    [0, "low", true],
+    [149_999, "low", true],
+    [150_000, "rising", true],
+    [300_000, "high", true],
+    [450_000, "falling", true],
+    [600_000, "low", false],
+    [1_650_000, "falling", false],
+    [1_800_000, "low", true],
+  ]) {
+    const t = tideAt(ms);
+    assert.deepEqual([t.phase, t.spring], [phase, spring], `at ${ms} ms`);
+  }
+  assert.equal(tideAt(1_000_000).endsMs, 1_050_000); // as get_tide's phase_ends_ms
+});
+
+test("it can tell you when the next low (or spring low) tide comes", () => {
+  assert.equal(nextTide(1_000_000, "low"), 1_200_000);
+  assert.equal(nextTide(1_250_000, "low"), 1_200_000); // already low: that one
+  assert.equal(nextTide(1_000_000, "low", true), 1_800_000);
+  assert.equal(nextTide(1_000_000, "high"), 900_000); // high tide now
+  assert.equal(nextTide(1_100_000, "high"), 1_500_000);
+  assert.equal(tideAt(nextTide(123_456_789, "high", true)).spring, true);
+});
+
+test("the water rises and falls smoothly, lowest at low tide and highest at high tide", () => {
+  let last = tideHeight(0);
+  let lowest = Infinity;
+  let highest = -Infinity;
+  for (let ms = 0; ms < TIDE_PERIOD_MS * 6; ms += 1000) {
+    const h = tideHeight(ms);
+    assert.ok(Math.abs(h - last) < 0.02, `no jumps (at ${ms} ms)`);
+    last = h;
+    const { phase } = tideAt(ms);
+    if (phase === "low") assert.ok(h < -0.7);
+    if (phase === "high") assert.ok(h > 0.7);
+    if (phase === "rising" || phase === "falling") assert.ok(Math.abs(h) <= 0.71 * 1.35);
+    lowest = Math.min(lowest, h);
+    highest = Math.max(highest, h);
+  }
+  assert.ok(lowest < -1.3, "spring lows go lower");
+  assert.ok(highest > 1 && highest < 1.35);
+});
+
+test("what the tide brings in she pays less for; what it hides she pays more for", () => {
+  const plain = market(undefined);
+  for (const t of ["kelp", "pearl"]) {
+    assert.ok(unitBid(market(LOW), t) < unitBid(plain, t), `${t} at low tide`);
+    assert.ok(unitBid(market(HIGH), t) > unitBid(plain, t), `${t} at high tide`);
+    assert.ok(unitBid(market(SPRING_LOW), t) < unitBid(market(LOW), t), `${t} at spring low`);
+  }
+  assert.ok(unitBid(market(LOW), "driftwood") > unitBid(plain, "driftwood"));
+  assert.ok(unitBid(market(HIGH), "driftwood") < unitBid(plain, "driftwood"));
+  assert.ok(unitBid(market(SPRING_HIGH), "driftwood") < unitBid(market(HIGH), "driftwood"));
+  for (const tide of [LOW, HIGH, SPRING_LOW, SPRING_HIGH, { phase: "rising" }, { phase: "falling" }]) {
+    assert.equal(unitBid(market(tide), "ore"), unitBid(plain, "ore"), "the cliffs are above the tide");
+  }
+  for (const phase of ["rising", "falling"]) {
+    for (const t of RAW) assert.equal(unitBid(market({ phase, spring: true }), t), unitBid(plain, t));
+  }
+});
+
+test("over a whole tide her offers average out to about what they were", () => {
+  for (const t of RAW) {
+    let sum = 0;
+    for (const phase of PHASES) sum += tideBidFactor(t, { phase, spring: false });
+    assert.ok(Math.abs(sum / 4 - 1) < 0.001, t);
+  }
+});
+
+test("the tide never pushes her past the ceiling the contract enforces", () => {
+  for (const tide of [HIGH, SPRING_HIGH, LOW, SPRING_LOW]) {
+    for (const t of RAW) {
+      for (let stock = 0; stock < 30; stock++) {
+        const m = market(tide, { stock: { [t]: stock, boat: 0, beacon: 0 } });
+        assert.ok(unitBid(m, t) <= m.ceiling[t], `${t} at ${tide.phase}${tide.spring ? " (spring)" : ""}, stock ${stock}`);
+      }
+    }
+  }
+});
+
+test("the price board, her haggling and her notice-board buying all follow the tide", () => {
+  const kelpBid = (tide) => priceBoard(market(tide)).buys.find((b) => b.token === "kelp").price;
+  assert.ok(kelpBid(HIGH) > kelpBid(LOW));
+  assert.ok(openHaggle(market(HIGH), { side: "buy", token: "kelp", qty: 4 }, () => 0.5).counter > openHaggle(market(LOW), { side: "buy", token: "kelp", qty: 4 }, () => 0.5).counter);
+  // a kelp notice priced between her low-tide and high-tide offers: she buys it only when the tide is in
+  const price = Math.round((unitBid(market(LOW), "kelp") + unitBid(market(HIGH), "kelp")) / 2);
+  const notice = [{ id: 1, seller: "a.testnet", token: "kelp", qty: 1, unit: price, listedMs: 0, expiresMs: 10 ** 12 }];
+  assert.equal(boardPicks(market(LOW), notice, 60_000).length, 0);
+  assert.equal(boardPicks(market(HIGH), notice, 60_000).length, 1);
+});
+
+test("Maren says why the tide moved her offer, and names her price", () => {
+  for (const [kind, phase, token] of [
+    ["open_buy_tide_cheap", "low", "kelp"],
+    ["open_buy_tide_cheap", "high", "driftwood"],
+    ["open_buy_tide_dear", "high", "pearl"],
+    ["open_buy_tide_dear", "low", "driftwood"],
+  ]) {
+    for (const r of [0, 0.99]) {
+      const line = writtenLine(kind, { token, qty: 2, price: 7, why: TIDE_WHY[phase][token] }, () => r);
+      assert.match(line, /\b7 coins\b/);
+      assert.ok(line.includes(TIDE_WHY[phase][token]), line);
+    }
+  }
+});
