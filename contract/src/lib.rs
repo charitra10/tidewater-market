@@ -4113,6 +4113,60 @@ mod tests {
             .collect()
     }
 
+    /// The shared table of what each trip can find (also checked against the
+    /// fast-forward's copy of these rules, in server/sim.test.js).
+    const YIELDS: &str = include_str!("../tests/fixtures/yields.json");
+
+    #[test]
+    fn the_yields_are_the_shared_table() {
+        let table: near_sdk::serde_json::Value = near_sdk::serde_json::from_str(YIELDS).unwrap();
+        // one market and one forager for every case, with time only moving forward
+        let mut m = setup();
+        let mut after = 1000u64;
+        let mut trip = |m: &mut Market, ts: u64, i: usize, spot: &str| {
+            ctx_seed(alice(), ZERO, ts, i as u8);
+            let have = m.players.get(&alice()).cloned().unwrap().items;
+            if have[PICKAXE] == 0 {
+                give(m, alice(), PICKAXE, 1); // (a pickaxe may break)
+            }
+            if have[BOAT] == 0 {
+                give(m, alice(), BOAT, 1);
+            }
+            m.forage(spot.into())
+        };
+        for case in table["cases"].as_array().unwrap() {
+            let spot = case["spot"].as_str().unwrap();
+            let times: Vec<u64> = if case["storm"].as_bool().unwrap() {
+                (after / 1800 + 1..).map(|b| in_storm(b, 20)).filter(|ts| *ts > after).take(80).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+            } else {
+                let phase = TIDE_PHASES.iter().position(|p| *p == case["tide"].as_str().unwrap()).unwrap() as u64;
+                let spring = case["spring"].as_bool().unwrap();
+                // that phase of successive tides (spring or not), skipping storms and events
+                (after * 1000 / TIDE_PERIOD_MS + 1..)
+                    .filter(|tide| (*tide % SPRING_EVERY == 0) == spring)
+                    .map(|tide| tide * TIDE_PERIOD_MS / 1000 + phase * 150 + 7)
+                    .filter(|ts| quiet(ts * 1000))
+                    .take(80)
+                    .collect()
+            };
+            after = *times.last().unwrap();
+            let results: Vec<ForageResult> = times.iter().enumerate().map(|(i, ts)| trip(&mut m, *ts, i, spot)).collect();
+            let want = case["yield"].as_object().unwrap();
+            for (t, token) in TOKENS.iter().enumerate().take(PICKAXE) {
+                let seen: Vec<u32> = results.iter().map(|r| r.found[t]).collect();
+                let range = (*seen.iter().min().unwrap(), *seen.iter().max().unwrap());
+                let expect = want.get(*token).map_or((0, 0), |r| (r[0].as_u64().unwrap() as u32, r[1].as_u64().unwrap() as u32));
+                assert_eq!(range, expect, "{token} on the {spot} in {case}");
+            }
+        }
+        let energy = &table["energy"];
+        for (name, cost, _) in SPOTS {
+            assert_eq!(energy[name].as_u64().unwrap() as u32, cost, "energy for {name}");
+        }
+        assert_eq!(table["pickaxe_break_pct"]["calm"].as_u64().unwrap() as u8, PICKAXE_BREAK_PCT);
+        assert_eq!(table["pickaxe_break_pct"]["storm"].as_u64().unwrap() as u8, STORM_BREAK_PCT);
+    }
+
     // ---------------- storms ----------------
 
     /// A time `secs` seconds into the storm of half hour `block` (or of the next

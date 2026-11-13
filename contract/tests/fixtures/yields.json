@@ -1,0 +1,22 @@
+{
+  "note": "What one forage trip can find, by spot, tide and storm, with no event under way: [least, most] per item; items not listed are always 0. The contract's forage (the_yields_are_the_shared_table in contract/src/lib.rs) and the fast-forward's copy (web/sim-engine.js, tested in server/sim.test.js) are both checked against this table.",
+  "cases": [
+    { "spot": "shore", "tide": "low", "spring": false, "storm": false, "yield": { "kelp": [2, 4], "driftwood": [0, 1] } },
+    { "spot": "shore", "tide": "low", "spring": true, "storm": false, "yield": { "kelp": [3, 5], "driftwood": [0, 1] } },
+    { "spot": "shore", "tide": "rising", "spring": false, "storm": false, "yield": { "kelp": [1, 3], "driftwood": [0, 2] } },
+    { "spot": "shore", "tide": "high", "spring": false, "storm": false, "yield": { "kelp": [1, 2], "driftwood": [1, 3] } },
+    { "spot": "shore", "tide": "high", "spring": true, "storm": false, "yield": { "kelp": [1, 2], "driftwood": [2, 4] } },
+    { "spot": "shore", "tide": "falling", "spring": false, "storm": false, "yield": { "kelp": [1, 3], "driftwood": [0, 2] } },
+    { "spot": "shore", "storm": true, "yield": { "kelp": [1, 3], "driftwood": [2, 5], "pearl": [0, 1] } },
+    { "spot": "cliffs", "tide": "low", "spring": false, "storm": false, "yield": { "ore": [1, 2], "driftwood": [0, 1] } },
+    { "spot": "cliffs", "tide": "high", "spring": true, "storm": false, "yield": { "ore": [1, 2], "driftwood": [0, 1] } },
+    { "spot": "cliffs", "storm": true, "yield": { "ore": [1, 2], "driftwood": [0, 1] } },
+    { "spot": "reef", "tide": "low", "spring": false, "storm": false, "yield": { "pearl": [1, 2], "kelp": [1, 2] } },
+    { "spot": "reef", "tide": "low", "spring": true, "storm": false, "yield": { "pearl": [1, 3], "kelp": [1, 2] } },
+    { "spot": "reef", "tide": "rising", "spring": false, "storm": false, "yield": { "pearl": [0, 2], "kelp": [1, 2] } },
+    { "spot": "reef", "tide": "high", "spring": false, "storm": false, "yield": { "pearl": [0, 1], "kelp": [1, 2] } },
+    { "spot": "reef", "tide": "high", "spring": true, "storm": false, "yield": { "pearl": [0, 1], "kelp": [1, 2] } }
+  ],
+  "energy": { "shore": 1, "cliffs": 2, "reef": 3 },
+  "pickaxe_break_pct": { "calm": 12, "storm": 25 }
+}
