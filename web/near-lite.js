@@ -176,6 +176,11 @@ export const actions = {
     w.u32(methods.length);
     for (const m of methods) w.str(m);
   },
+  /// Close the signing account and send everything left in it to `beneficiaryId`.
+  deleteAccount: (beneficiaryId) => (w) => {
+    w.u8(7);
+    w.str(beneficiaryId);
+  },
 };
 
 export class ChainError extends Error {
