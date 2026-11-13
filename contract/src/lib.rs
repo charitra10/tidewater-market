@@ -378,6 +378,22 @@ pub struct QuoteResult {
 }
 
 #[near(serializers = [json])]
+pub struct ListResult {
+    /// "listed" or "blocked".
+    pub status: String,
+    pub reason: Option<String>,
+    pub listing: Option<Listing>,
+}
+
+/// Who is on one side of a deal on the notice board.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Party {
+    Player,
+    Shop,
+    Dealer,
+}
+
+#[near(serializers = [json])]
 pub struct BoardBuyResult {
     /// "bought" or "blocked".
     pub status: String,
@@ -1012,7 +1028,7 @@ impl Market {
         let i = self.listing_index(id);
         require!(self.listings[i].seller == who, "That is not your notice");
         let l = self.listings.remove(i);
-        self.return_to_seller(&l);
+        self.return_to_seller(&l); // (a merchant's goods never left the shelf)
         self.board_version += 1;
         emit_game("unlisted", json!({ "id": id, "seller": who }));
     }
@@ -1032,6 +1048,7 @@ impl Market {
         let total = l.unit_price.as_yoctonear() * qty as u128;
         let paid = env::attached_deposit().as_yoctonear();
         require!(paid >= total, "Attach the price");
+        require!(self.party(&buyer) == Party::Player, "Merchants buy off the board with their own methods");
         let mut b = self.player(&buyer);
         b.items[token_index(&l.token_id)] += qty;
         b.trades += 1;
@@ -1121,6 +1138,7 @@ impl Market {
         for (t, per) in inputs.iter() {
             let need = per * times;
             require!(self.stock[*t] >= need, format!("Not enough {}", TOKENS[*t]));
+            require!(self.stock[*t] >= need + self.reserved(&self.merchant_id, *t), "Those are promised on the notice board");
             cost_in += self.take_stock(*t, need);
             self.supply[*t] -= need as u64;
             burned.push((*t, need));
@@ -1142,6 +1160,7 @@ impl Market {
         require!(price > 0, "That item cannot be exported");
         require!(!storm_at(env::block_timestamp_ms()).0, "The mainland boat stays in harbour during a storm");
         require!(qty > 0 && self.stock[t] >= qty, "Not enough stock");
+        require!(self.stock[t] >= qty + self.reserved(&self.merchant_id, t), "Those are promised on the notice board");
         let pay = price * qty as u128;
         require!(pay <= self.mainland_fund, "The mainland is out of coin");
         let cost_out = self.take_stock(t, qty);
@@ -1164,6 +1183,7 @@ impl Market {
         self.assert_merchant();
         let i = self.listing_index(id);
         let l = self.listings[i].clone();
+        require!(l.seller != self.merchant_id, "That is her own notice");
         require!(env::block_timestamp_ms() <= l.expires_ms, "That notice has expired");
         require!(qty > 0 && qty <= l.qty, "There are not that many for sale");
         let t = token_index(&l.token_id);
@@ -1191,9 +1211,89 @@ impl Market {
         }
     }
 
+    /// Pin a notice offering goods from her shelves. They stay on the shelves
+    /// (promised, so she cannot export or craft them away) until someone buys
+    /// them, she takes the notice down, or it expires. She may not ask less
+    /// than her price floor; a refused notice is recorded like a refused quote.
+    pub fn shop_list_item(&mut self, token_id: String, qty: u32, unit_price: NearToken) -> ListResult {
+        self.assert_merchant();
+        let t = token_index(&token_id);
+        let reason = if self.frozen {
+            Some("frozen")
+        } else if unit_price.as_yoctonear() < self.policy.floor[t].as_yoctonear() {
+            Some("below_price_floor")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            let board = env::current_account_id();
+            self.record_blocked(board, Side::Sell, token_id, qty, NearToken::from_yoctonear(unit_price.as_yoctonear() * qty as u128), reason);
+            return ListResult { status: "blocked".into(), reason: Some(reason.to_string()), listing: None };
+        }
+        let merchant = self.merchant_id.clone();
+        require!(self.stock[t] >= self.reserved(&merchant, t) + qty, "Not enough on the shelves");
+        let listing = self.pin(merchant, token_id, qty, unit_price);
+        ListResult { status: "listed".into(), reason: None, listing: Some(listing) }
+    }
+
     // ------------------------------------------------------------------
     // The pearl and ore dealer (only his own key can call these)
     // ------------------------------------------------------------------
+
+    /// Pin a notice offering goods from his hold (promised, so he cannot ship
+    /// them). He may not ask less than they cost him.
+    pub fn dealer_list_item(&mut self, token_id: String, qty: u32, unit_price: NearToken) -> ListResult {
+        self.assert_dealer();
+        let t = token_index(&token_id);
+        let d = self.dealer.as_ref().unwrap();
+        let avg = if d.stock[t] == 0 { 0 } else { d.cost[t] / d.stock[t] as u128 };
+        let reason = if self.frozen {
+            Some("frozen")
+        } else if unit_price.as_yoctonear() < avg {
+            Some("below_cost")
+        } else {
+            None
+        };
+        let dealer_id = d.account_id.clone();
+        if let Some(reason) = reason {
+            self.dealer_blocked(env::current_account_id(), Side::Sell, token_id, qty, unit_price.as_yoctonear() * qty as u128, reason);
+            return ListResult { status: "blocked".into(), reason: Some(reason.to_string()), listing: None };
+        }
+        require!(d.stock[t] >= self.reserved(&dealer_id, t) + qty, "Not enough in the hold");
+        let listing = self.pin(dealer_id, token_id, qty, unit_price);
+        ListResult { status: "listed".into(), reason: None, listing: Some(listing) }
+    }
+
+    /// Buy goods off the notice board (a player's, or Maren's), paid from his
+    /// treasury, under his guard rails; a refusal is recorded instead of failing.
+    pub fn dealer_buy_listing(&mut self, id: u64, qty: u32) -> BoardBuyResult {
+        self.assert_dealer();
+        let i = self.listing_index(id);
+        let l = self.listings[i].clone();
+        let dealer_id = self.dealer.as_ref().unwrap().account_id.clone();
+        require!(l.seller != dealer_id, "That is his own notice");
+        require!(env::block_timestamp_ms() <= l.expires_ms, "That notice has expired");
+        require!(qty > 0 && qty <= l.qty, "There are not that many for sale");
+        let t = token_index(&l.token_id);
+        let total = l.unit_price.as_yoctonear() * qty as u128;
+        if let Some(reason) = self.check_dealer_quote(t, qty, total) {
+            self.dealer_blocked(l.seller, Side::Buy, l.token_id, qty, total, reason);
+            return BoardBuyResult { status: "blocked".into(), reason: Some(reason.to_string()), sale: None };
+        }
+        let now = env::block_timestamp_ms();
+        let d = self.dealer.as_mut().unwrap();
+        if now >= d.window_start_ms + d.policy.window_sec * 1000 {
+            d.window_start_ms = now;
+            d.bought_in_window = 0;
+        }
+        d.stock[t] += qty;
+        d.cost[t] += total;
+        d.treasury -= total;
+        d.total_purchases += total;
+        d.bought_in_window += total;
+        let sale = self.close_sale(i, &dealer_id, qty, total);
+        BoardBuyResult { status: "bought".into(), reason: None, sale: Some(sale) }
+    }
 
     /// Offer to buy a player's goods. Like Maren's quotes: a newer one replaces
     /// the player's older one, and a quote that breaks his guard rails is
@@ -1249,10 +1349,12 @@ impl Market {
         require!(!self.frozen, "The merchant is frozen");
         require!(!storm_at(env::block_timestamp_ms()).0, "The dealer's boat stays in harbour during a storm");
         let t = token_index(&token_id);
+        let promised = self.reserved(&self.dealer.as_ref().unwrap().account_id.clone(), t);
         let d = self.dealer.as_mut().unwrap();
         let price = d.policy.city_price[t].as_yoctonear();
         require!(price > 0, "The city does not buy that");
         require!(qty > 0 && d.stock[t] >= qty, "Not enough in the hold");
+        require!(d.stock[t] >= qty + promised, "Those are promised on the notice board");
         let pay = price * qty as u128;
         require!(pay <= self.mainland_fund, "The mainland is out of coin");
         let cost_out = take_from(&mut d.stock, &mut d.cost, t, qty);
@@ -1772,7 +1874,8 @@ impl Market {
     /// Items waiting on the board, in total or for one seller.
     fn on_board(&self, seller: Option<&AccountId>) -> [u32; N] {
         let mut n = [0u32; N];
-        for l in self.listings.iter().filter(|l| seller.map_or(true, |s| *s == l.seller)) {
+        // merchants' notices are promises on their shelves, not goods in escrow
+        for l in self.listings.iter().filter(|l| seller.map_or(true, |s| *s == l.seller) && self.party(&l.seller) == Party::Player) {
             n[token_index(&l.token_id)] += l.qty;
         }
         n
@@ -1785,7 +1888,53 @@ impl Market {
             .unwrap_or_else(|| env::panic_str("That notice is no longer on the board"))
     }
 
+    /// Which side of the counter an account is on.
+    fn party(&self, a: &AccountId) -> Party {
+        if *a == self.merchant_id {
+            Party::Shop
+        } else if self.dealer.as_ref().is_some_and(|d| d.account_id == *a) {
+            Party::Dealer
+        } else {
+            Party::Player
+        }
+    }
+
+    /// How many of a token a merchant has promised on the board.
+    fn reserved(&self, seller: &AccountId, t: usize) -> u32 {
+        self.listings.iter().filter(|l| l.seller == *seller && token_index(&l.token_id) == t).map(|l| l.qty).sum()
+    }
+
+    /// Put a merchant's notice on the board (no escrow: the goods stay on the shelf).
+    fn pin(&mut self, seller: AccountId, token_id: String, qty: u32, unit_price: NearToken) -> Listing {
+        require!(qty > 0 && qty <= MAX_QTY, "Bad quantity");
+        require!(unit_price.as_yoctonear() > 0 && unit_price.as_yoctonear() <= MAX_UNIT_PRICE, "Bad price");
+        self.sweep_board();
+        require!(
+            self.listings.iter().filter(|l| l.seller == seller).count() < MAX_LISTINGS_PER_SELLER,
+            "Already three notices up"
+        );
+        require!(self.listings.len() < MAX_LISTINGS, "The notice board is full");
+        let now = env::block_timestamp_ms();
+        let listing = Listing { id: self.next_id, seller, token_id, qty, unit_price, listed_ms: now, expires_ms: now + LISTING_TTL_MS };
+        self.next_id += 1;
+        self.listings.push(listing.clone());
+        self.board_version += 1;
+        emit_game("listed", json!(listing));
+        listing
+    }
+
+    fn dealer_blocked(&mut self, player: AccountId, side: Side, token_id: String, qty: u32, total: u128, reason: &str) {
+        let blocked = Blocked { player, side, token_id, qty, total: NearToken::from_yoctonear(total), reason: reason.to_string(), timestamp_ms: env::block_timestamp_ms() };
+        let d = self.dealer.as_mut().unwrap();
+        emit_game("dealer_quote_blocked", json!(blocked));
+        d.blocked_count += 1;
+        push_capped(&mut d.blocked, blocked, MAX_DEALER_BLOCKED);
+    }
+
     fn return_to_seller(&mut self, l: &Listing) {
+        if self.party(&l.seller) != Party::Player {
+            return; // a merchant's goods never left the shelf
+        }
         let t = token_index(&l.token_id);
         let mut p = self.player(&l.seller);
         p.items[t] += l.qty;
@@ -1831,19 +1980,37 @@ impl Market {
         if l.qty == 0 {
             self.listings.remove(i);
         }
-        let mut s = self.player(&sale.seller);
-        s.trades += 1;
-        self.players.insert(sale.seller.clone(), s);
-        Promise::new(sale.seller.clone()).transfer(sale.total).detach();
+        let t = token_index(&sale.token_id);
+        let from = match self.party(&sale.seller) {
+            // a player's goods were in escrow; the NEAR goes to their account
+            Party::Player => {
+                let mut s = self.player(&sale.seller);
+                s.trades += 1;
+                self.players.insert(sale.seller.clone(), s);
+                Promise::new(sale.seller.clone()).transfer(sale.total).detach();
+                env::current_account_id()
+            }
+            // a merchant's goods come off the shelf; the NEAR goes into the treasury
+            Party::Shop => {
+                require!(self.stock[t] >= qty, "Maren no longer has them");
+                let cost_out = self.take_stock(t, qty);
+                self.treasury += total;
+                self.total_sales += total;
+                self.profit += total as i128 - cost_out as i128;
+                self.merchant_id.clone()
+            }
+            Party::Dealer => {
+                let d = self.dealer.as_mut().unwrap();
+                require!(d.stock[t] >= qty, "Silas no longer has them");
+                let cost_out = take_from(&mut d.stock, &mut d.cost, t, qty);
+                d.treasury += total;
+                d.profit += total as i128 - cost_out as i128;
+                d.account_id.clone()
+            }
+        };
         self.board_sale_count += 1;
         self.board_version += 1;
-        emit_mt(
-            "mt_transfer",
-            "old_owner_id",
-            &env::current_account_id(),
-            Some(("new_owner_id", buyer)),
-            &[(token_index(&sale.token_id), qty)],
-        );
+        emit_mt("mt_transfer", "old_owner_id", &from, Some(("new_owner_id", buyer)), &[(t, qty)]);
         emit_game("board_sale", json!(sale));
         push_capped(&mut self.board_sales, sale.clone(), MAX_BOARD_SALES);
         sale
@@ -1884,7 +2051,7 @@ impl Market {
         }
         match side {
             Side::Sell => {
-                if self.stock[t] < qty {
+                if self.stock[t] < qty + self.reserved(&self.merchant_id, t) {
                     return Some("out_of_stock");
                 }
                 if total < self.policy.floor[t].as_yoctonear() * qty as u128 {
@@ -3012,5 +3179,173 @@ mod tests {
         ctx(acc("tidewater-f2b962.testnet"), YOCTO, 1_794_600_000);
         again.set_dealer(acc("dealer.tidewater-f2b962.testnet"), dealer_policy());
         assert_eq!(again.get_market().dealer_id, Some(acc("dealer.tidewater-f2b962.testnet")));
+    }
+
+    // ---------------- Maren and Silas trade with each other on the board ----------------
+
+    /// The dealer market, with 10 ore on Maren's shelves (booked at 15 each) and
+    /// a mainland purse to ship into.
+    fn setup_trade() -> Market {
+        let mut m = setup_dealer();
+        ctx(owner(), YOCTO, 1000);
+        m.restock("ore".into(), 10, coins(15));
+        ctx(owner(), coins(300), 1000);
+        m.fund_mainland();
+        m
+    }
+
+    fn shop_pins(m: &mut Market, token: &str, qty: u32, price: u128, ts: u64) -> ListResult {
+        ctx(merchant(), ZERO, ts);
+        m.shop_list_item(token.into(), qty, coins(price))
+    }
+
+    #[test]
+    fn maren_pins_her_surplus_ore_and_silas_buys_it() {
+        let mut m = setup_trade();
+        let t = calm(3);
+        let l = shop_pins(&mut m, "ore", 4, 22, t).listing.unwrap();
+        assert_eq!(l.seller, merchant());
+        // promised, not moved: still on her shelf, nothing in escrow
+        assert_eq!((m.get_market().stock[ORE], m.mt_balance_of(contract(), "ore".into()).0), (10, 0));
+        ctx(dealer(), ZERO, t + 20);
+        let r = m.dealer_buy_listing(l.id, 4);
+        assert_eq!(r.status, "bought");
+        assert!(transfers().is_empty(), "merchant to merchant: no NEAR leaves the contract");
+        let (mv, d) = (m.get_market(), m.get_dealer().unwrap());
+        assert_eq!((mv.stock[ORE], mv.treasury, mv.profit_yocto), (6, coins(1000 + 88), coins(88 - 60).as_yoctonear().to_string()));
+        assert_eq!((d.stock[ORE], d.treasury), (4, coins(500 - 88)));
+        let sale = &m.get_board_sales(Some(1))[0];
+        assert_eq!((&sale.seller, &sale.buyer, sale.qty), (&merchant(), &dealer(), 4));
+        assert!(m.get_listings().is_empty());
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    #[test]
+    fn silas_sells_his_pearls_to_maren_through_the_board() {
+        let mut m = setup_trade();
+        give(&mut m, alice(), PEARL, 3);
+        let q = dealer_quote(&mut m, "pearl", 3, 180, calm(3)).quote.unwrap();
+        ctx(alice(), ZERO, calm(3) + 1);
+        m.accept_quote(q.id);
+        ctx(dealer(), ZERO, calm(3) + 10);
+        let l = m.dealer_list_item("pearl".into(), 3, coins(85)).listing.unwrap();
+        // he cannot ship what he has promised
+        assert_eq!(m.mt_balance_of(contract(), "pearl".into()).0, 0);
+        let r = quote_free_buy(&mut m, l.id, 3, calm(3) + 30);
+        assert_eq!(r.status, "bought");
+        let (mv, d) = (m.get_market(), m.get_dealer().unwrap());
+        assert_eq!((mv.stock[PEARL], mv.treasury), (3, coins(1000 - 255)));
+        assert_eq!((d.stock[PEARL], d.treasury), (0, coins(500 - 180 + 255)));
+        assert_eq!(d.profit_yocto, coins(75).as_yoctonear().to_string());
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    fn quote_free_buy(m: &mut Market, id: u64, qty: u32, ts: u64) -> BoardBuyResult {
+        ctx(merchant(), ZERO, ts);
+        m.shop_buy_listing(id, qty)
+    }
+
+    #[test]
+    fn a_player_can_buy_off_a_merchants_notice() {
+        let mut m = setup_trade();
+        let l = shop_pins(&mut m, "ore", 4, 22, calm(3)).listing.unwrap();
+        ctx(alice(), coins(50), calm(3) + 5);
+        m.buy_listing(l.id, Some(2));
+        assert_eq!(transfers(), vec![(alice(), coins(6))], "only the change goes out; the 44 go into her treasury");
+        assert_eq!((m.get_market().stock[ORE], m.get_market().treasury, items(&m, alice())[ORE]), (8, coins(1044), 2));
+        assert_eq!(m.get_listings()[0].qty, 2);
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    #[test]
+    fn merchants_keep_their_guard_rails_on_the_board() {
+        let mut m = setup_trade();
+        // Maren may not ask less than her floor (15 for ore in this policy)
+        assert_eq!(shop_pins(&mut m, "ore", 2, 10, calm(3)).reason.as_deref(), Some("below_price_floor"));
+        assert_eq!(m.get_market().blocked_count, 1);
+        // Silas may not dump below cost
+        give(&mut m, alice(), PEARL, 1);
+        let q = dealer_quote(&mut m, "pearl", 1, 60, calm(3)).quote.unwrap();
+        ctx(alice(), ZERO, calm(3) + 1);
+        m.accept_quote(q.id);
+        ctx(dealer(), ZERO, calm(3) + 2);
+        assert_eq!(m.dealer_list_item("pearl".into(), 1, coins(40)).reason.as_deref(), Some("below_cost"));
+        // nor pay over his ceiling (40 for ore), nor buy in a storm
+        let dear = shop_pins(&mut m, "ore", 1, 50, calm(3) + 3).listing.unwrap();
+        ctx(dealer(), ZERO, calm(3) + 4);
+        assert_eq!(m.dealer_buy_listing(dear.id, 1).reason.as_deref(), Some("above_price_ceiling"));
+        give(&mut m, alice(), ORE, 2);
+        let cheap = list(&mut m, alice(), "ore", 2, 20, calm(3) + 5);
+        ctx(dealer(), ZERO, in_storm(4, 20));
+        assert_eq!(m.dealer_buy_listing(cheap.id, 2).reason.as_deref(), Some("storm"));
+        assert_eq!(m.get_dealer().unwrap().blocked_count, 3);
+        assert_eq!(m.get_dealer().unwrap().stock[ORE], 0);
+    }
+
+    #[test]
+    fn silas_buys_players_notices_too_and_pays_them_directly() {
+        let mut m = setup_trade();
+        give(&mut m, alice(), ORE, 3);
+        let l = list(&mut m, alice(), "ore", 3, 20, calm(3));
+        ctx(dealer(), ZERO, calm(3) + 20);
+        assert_eq!(m.dealer_buy_listing(l.id, 3).status, "bought");
+        assert_eq!(transfers(), vec![(alice(), coins(60))]);
+        assert_eq!(m.get_dealer().unwrap().stock[ORE], 3);
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Those are promised on the notice board")]
+    fn promised_ore_is_not_exported() {
+        let mut m = setup_trade();
+        shop_pins(&mut m, "ore", 8, 22, calm(3));
+        ctx(merchant(), ZERO, calm(3) + 5);
+        m.export("ore".into(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Those are promised on the notice board")]
+    fn promised_pearls_are_not_shipped() {
+        let mut m = setup_trade();
+        give(&mut m, alice(), PEARL, 3);
+        let q = dealer_quote(&mut m, "pearl", 3, 180, calm(3)).quote.unwrap();
+        ctx(alice(), ZERO, calm(3) + 1);
+        m.accept_quote(q.id);
+        ctx(dealer(), ZERO, calm(3) + 2);
+        m.dealer_list_item("pearl".into(), 2, coins(85));
+        m.ship("pearl".into(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough on the shelves")]
+    fn she_cannot_promise_more_than_she_has() {
+        let mut m = setup_trade();
+        shop_pins(&mut m, "ore", 6, 22, calm(3));
+        shop_pins(&mut m, "ore", 5, 22, calm(3) + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "That is her own notice")]
+    fn she_does_not_buy_her_own_notice() {
+        let mut m = setup_trade();
+        let l = shop_pins(&mut m, "ore", 2, 22, calm(3)).listing.unwrap();
+        quote_free_buy(&mut m, l.id, 2, calm(3) + 20);
+    }
+
+    #[test]
+    fn a_merchants_notice_taken_down_or_expired_leaves_the_goods_on_the_shelf() {
+        let mut m = setup_trade();
+        let l = shop_pins(&mut m, "ore", 3, 22, calm(3)).listing.unwrap();
+        ctx(merchant(), ZERO, calm(3) + 5);
+        m.cancel_listing(l.id);
+        shop_pins(&mut m, "ore", 3, 22, calm(3) + 6);
+        // a day later it has expired; the next notice sweeps it away
+        give(&mut m, alice(), KELP, 1);
+        list(&mut m, alice(), "kelp", 1, 5, calm(3) + 6 + DAY_SEC + 1);
+        assert_eq!(m.get_listings().len(), 1);
+        assert_eq!(m.get_market().stock[ORE], 10);
+        ctx(merchant(), ZERO, calm(3) + DAY_SEC + 10);
+        m.export("ore".into(), 3); // no longer promised
+        assert_supply_adds_up(&m, &[alice()]);
     }
 }
