@@ -77,10 +77,10 @@ call restock "{\"token_id\":\"rope\",\"qty\":3,\"unit_cost\":\"$(coin 12)\"}" '1
 call restock "{\"token_id\":\"driftwood\",\"qty\":4,\"unit_cost\":\"$(coin 4)\"}" '1 yoctoNEAR'
 call restock "{\"token_id\":\"kelp\",\"qty\":3,\"unit_cost\":\"$(coin 3)\"}" '1 yoctoNEAR'
 
-step "Giving Maren a key that can ONLY quote, craft, export and buy off the notice board"
+step "Giving Maren a key that can ONLY quote, craft, export and trade on the notice board"
 KEYS=$(node scripts/keygen.mjs); MERCHANT_SK=${KEYS%% *}; MERCHANT_PK=${KEYS##* }
 run near account add-key "$MERCHANT" grant-function-call-access \
-  --allowance '0.4 NEAR' --contract-account-id "$MARKET" --function-names 'post_quote,cancel_quote,craft,export,shop_buy_listing' \
+  --allowance '0.4 NEAR' --contract-account-id "$MARKET" --function-names 'post_quote,cancel_quote,craft,export,shop_buy_listing,shop_list_item,cancel_listing' \
   use-manually-provided-public-key "$MERCHANT_PK" $SIGN
 
 umask 077
@@ -104,7 +104,7 @@ echo "   owner     $OWNER   (full-access key in ~/.near-credentials/testnet/)"
 echo "   contract  $MARKET"
 echo "   merchant  $MERCHANT   (her key in server/.env can only quote, craft, export and buy off the board)"
 echo "   guests    $GUESTS   (funds new players: 0.13 NEAR each)"
-echo "   dealer    dealer.$OWNER   (Silas; his key in server/.env can only quote, cancel and ship)"
+echo "   dealer    dealer.$OWNER   (Silas; his key in server/.env can only quote, ship and trade on the board)"
 echo
 bold "Next:"
 echo "   1. Open the shop:     node server/server.js      then visit http://localhost:8787"

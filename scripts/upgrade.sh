@@ -5,9 +5,9 @@
 #   1. Deploys the new contract. If the market's saved state is an older layout
 #      (before the notice board, or before the dealer), the same transaction runs
 #      `migrate`, so the code and the state change together or not at all.
-#   2. If Maren's key in server/.env cannot buy off the notice board yet, gives
-#      her a new function-call key that can (and still nothing else) and
-#      switches server/.env to it. Keys are never printed.
+#   2. If Maren's key in server/.env lacks one of her methods (they grew with the
+#      notice board), gives her a new function-call key that has them (and still
+#      nothing else) and switches server/.env to it. Keys are never printed.
 #
 # Needs the contract account's and Maren's full-access keys in the near-cli
 # legacy keychain (~/.near-credentials), where bootstrap.sh put them.
@@ -26,13 +26,13 @@ get() { grep -E "^$1=" server/.env | head -1 | cut -d= -f2-; }
 MARKET=$(get CONTRACT)
 MERCHANT=$(get MERCHANT_ID)
 WASM="contract/res/tidewater_market.wasm"
-METHODS="post_quote,cancel_quote,craft,export,shop_buy_listing"
+METHODS="post_quote,cancel_quote,craft,export,shop_buy_listing,shop_list_item,cancel_listing"
 NET="network-config testnet"
 SIGN="$NET sign-with-legacy-keychain send"
 
 # Asks the chain (read-only) whether the market's state is the current layout
-# (get_market reports dealer_id), and whether Maren's current key may call
-# shop_buy_listing. The key goes in
+# (get_market reports dealer_id), and whether Maren's current key may call the
+# newest of her methods (shop_list_item: pinning notices for Silas). The key goes in
 # through the environment, never the command line.
 STATE=$(MERCHANT_KEY="$(get MERCHANT_KEY)" node --input-type=module -e '
   import { Near, loadKey } from "./web/near-lite.js";
@@ -43,7 +43,7 @@ STATE=$(MERCHANT_KEY="$(get MERCHANT_KEY)" node --input-type=module -e '
   let can = false;
   try {
     const ak = await near.rpc("query", { request_type: "view_access_key", finality: "final", account_id: merchant, public_key: key.publicKey });
-    can = (ak.permission.FunctionCall?.method_names ?? []).includes("shop_buy_listing");
+    can = (ak.permission.FunctionCall?.method_names ?? []).includes("shop_list_item");
   } catch {}
   console.log(`${"dealer_id" in mv ? "current" : "old"} ${can ? "key-ok" : "key-old"}`);
 ' "$MARKET" "$MERCHANT" 2>>"$LOG")
@@ -58,7 +58,7 @@ else
 fi
 
 if [ "${STATE##* }" = key-old ]; then
-  step "Giving Maren a key that can ONLY quote, craft, export and buy off the notice board"
+  step "Giving Maren a key that can ONLY quote, craft, export and trade on the notice board"
   KEYS=$(node scripts/keygen.mjs); MERCHANT_SK=${KEYS%% *}; MERCHANT_PK=${KEYS##* }
   run near account add-key "$MERCHANT" grant-function-call-access \
     --allowance '0.4 NEAR' --contract-account-id "$MARKET" --function-names "$METHODS" \
