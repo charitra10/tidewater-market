@@ -14,6 +14,10 @@
 //!   Refused quotes are recorded (not panicked) so anyone can see what it tried.
 //! * Items are multi-token balances with the NEP-245 core views, transfer and
 //!   events (no approvals and no `mt_transfer_call`).
+//! * The notice board is the players' own market: anyone can pin a notice
+//!   offering goods at their own price. The goods wait here (escrow) until
+//!   another player buys them, the merchant buys them (under the same guard
+//!   rails as its quotes), the seller takes the notice down, or it expires.
 
 use near_sdk::json_types::U128;
 use near_sdk::serde_json::{self, json};
@@ -67,6 +71,13 @@ pub const MAX_BLOCKED: usize = 30;
 pub const MAX_KEEPERS: usize = 50;
 pub const MAX_MEMO_LEN: usize = 120;
 pub const MAX_QTY: u32 = 50;
+/// The notice board.
+pub const MAX_LISTINGS: usize = 40;
+pub const MAX_LISTINGS_PER_SELLER: usize = 3;
+pub const LISTING_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+pub const MAX_BOARD_SALES: usize = 30;
+/// No single item may be priced above 100 NEAR (keeps totals far from overflow).
+pub const MAX_UNIT_PRICE: u128 = 100 * 10u128.pow(24);
 
 #[near]
 #[derive(BorshStorageKey)]
@@ -154,6 +165,35 @@ pub struct Keeper {
     pub lit_ms: u64,
 }
 
+/// A notice on the board: a player's goods for sale at the player's own
+/// price. The goods wait in the contract until sold, taken down or expired.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listing {
+    pub id: u64,
+    pub seller: AccountId,
+    pub token_id: String,
+    /// How many are still for sale.
+    pub qty: u32,
+    /// Price per item.
+    pub unit_price: NearToken,
+    pub listed_ms: u64,
+    pub expires_ms: u64,
+}
+
+/// Goods bought off the notice board. `buyer` is the merchant when the shop bought them.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoardSale {
+    pub listing_id: u64,
+    pub seller: AccountId,
+    pub buyer: AccountId,
+    pub token_id: String,
+    pub qty: u32,
+    pub total: NearToken,
+    pub timestamp_ms: u64,
+}
+
 #[near(serializers = [borsh])]
 #[derive(Clone, Default)]
 pub struct Player {
@@ -180,6 +220,8 @@ pub struct PlayerView {
     pub joined_ms: u64,
     /// When this player lit the lighthouse (0 = not yet).
     pub lit_ms: u64,
+    /// Items this player has pinned on the notice board, in `TOKENS` order.
+    pub on_board: Vec<u32>,
 }
 
 #[near(serializers = [json])]
@@ -207,6 +249,11 @@ pub struct MarketView {
     pub trade_count: u64,
     pub blocked_count: u64,
     pub now_ms: u64,
+    /// Notices on the board that can still be bought.
+    pub listing_count: u32,
+    pub board_sale_count: u64,
+    /// Goes up whenever the board changes, so clients know when to read it again.
+    pub board_version: u64,
 }
 
 #[near(serializers = [json])]
@@ -215,6 +262,14 @@ pub struct QuoteResult {
     pub status: String,
     pub reason: Option<String>,
     pub quote: Option<Quote>,
+}
+
+#[near(serializers = [json])]
+pub struct BoardBuyResult {
+    /// "bought" or "blocked".
+    pub status: String,
+    pub reason: Option<String>,
+    pub sale: Option<BoardSale>,
 }
 
 #[near(serializers = [json])]
@@ -240,6 +295,41 @@ pub struct Market {
     quotes: LookupMap<AccountId, Quote>,
     stock: [u32; N],
     /// Total cost of the stock on the shelves (average-cost accounting).
+    cost: [u128; N],
+    supply: [u64; N],
+    treasury: u128,
+    profit: i128,
+    total_sales: u128,
+    total_purchases: u128,
+    mainland_fund: u128,
+    total_exports: u128,
+    window_start_ms: u64,
+    bought_in_window: u128,
+    next_id: u64,
+    trade_count: u64,
+    blocked_count: u64,
+    trades: Vec<Trade>,
+    blocked: Vec<Blocked>,
+    keepers: Vec<Keeper>,
+    listings: Vec<Listing>,
+    board_sales: Vec<BoardSale>,
+    board_sale_count: u64,
+    board_version: u64,
+}
+
+/// The state layout before the notice board (v1), read once by `migrate`.
+#[near(serializers = [borsh])]
+pub struct MarketV1 {
+    owner_id: AccountId,
+    merchant_id: AccountId,
+    frozen: bool,
+    policy: Policy,
+    energy_max: u32,
+    energy_regen_ms: u64,
+    players: LookupMap<AccountId, Player>,
+    player_count: u32,
+    quotes: LookupMap<AccountId, Quote>,
+    stock: [u32; N],
     cost: [u128; N],
     supply: [u64; N],
     treasury: u128,
@@ -347,6 +437,51 @@ impl Market {
             trades: Vec::new(),
             blocked: Vec::new(),
             keepers: Vec::new(),
+            listings: Vec::new(),
+            board_sales: Vec::new(),
+            board_sale_count: 0,
+            board_version: 0,
+        }
+    }
+
+    /// One-time upgrade from the v1 state (before the notice board). Keeps
+    /// every player, item, trade and keeper. Only the contract account itself
+    /// can call it, in the same transaction that deploys the new code.
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        let old: MarketV1 = env::state_read().unwrap_or_else(|| env::panic_str("No v1 state to migrate"));
+        Self {
+            owner_id: old.owner_id,
+            merchant_id: old.merchant_id,
+            frozen: old.frozen,
+            policy: old.policy,
+            energy_max: old.energy_max,
+            energy_regen_ms: old.energy_regen_ms,
+            players: old.players,
+            player_count: old.player_count,
+            quotes: old.quotes,
+            stock: old.stock,
+            cost: old.cost,
+            supply: old.supply,
+            treasury: old.treasury,
+            profit: old.profit,
+            total_sales: old.total_sales,
+            total_purchases: old.total_purchases,
+            mainland_fund: old.mainland_fund,
+            total_exports: old.total_exports,
+            window_start_ms: old.window_start_ms,
+            bought_in_window: old.bought_in_window,
+            next_id: old.next_id,
+            trade_count: old.trade_count,
+            blocked_count: old.blocked_count,
+            trades: old.trades,
+            blocked: old.blocked,
+            keepers: old.keepers,
+            listings: Vec::new(),
+            board_sales: Vec::new(),
+            board_sale_count: 0,
+            board_version: 0,
         }
     }
 
@@ -561,6 +696,90 @@ impl Market {
     }
 
     // ------------------------------------------------------------------
+    // The notice board: players sell to players (and to the merchant)
+    // ------------------------------------------------------------------
+
+    /// Pin a notice offering `qty` of an item at `unit_price` each. The items
+    /// leave your bag and wait on the board until someone buys them, you take
+    /// the notice down, or it expires after a day (then they come back to you).
+    pub fn list_item(&mut self, token_id: String, qty: u32, unit_price: NearToken) -> Listing {
+        let seller = env::predecessor_account_id();
+        let t = token_index(&token_id);
+        require!(qty > 0 && qty <= MAX_QTY, "Bad quantity");
+        let price = unit_price.as_yoctonear();
+        require!(price > 0, "Set a price");
+        require!(price <= MAX_UNIT_PRICE, "That price is too high");
+        self.sweep_board();
+        let mut p = self.player(&seller);
+        require!(p.items[t] >= qty, "You do not have that many");
+        require!(
+            self.listings.iter().filter(|l| l.seller == seller).count() < MAX_LISTINGS_PER_SELLER,
+            format!("You already have {MAX_LISTINGS_PER_SELLER} notices up. Take one down first.")
+        );
+        require!(self.listings.len() < MAX_LISTINGS, "The notice board is full");
+        p.items[t] -= qty;
+        self.players.insert(seller.clone(), p);
+        let now = env::block_timestamp_ms();
+        let listing = Listing {
+            id: self.next_id,
+            seller: seller.clone(),
+            token_id,
+            qty,
+            unit_price,
+            listed_ms: now,
+            expires_ms: now + LISTING_TTL_MS,
+        };
+        self.next_id += 1;
+        self.listings.push(listing.clone());
+        self.board_version += 1;
+        emit_mt(
+            "mt_transfer",
+            "old_owner_id",
+            &seller,
+            Some(("new_owner_id", &env::current_account_id())),
+            &[(t, qty)],
+        );
+        emit_game("listed", json!(listing));
+        listing
+    }
+
+    /// Take your notice down (expired or not); the goods go back in your bag.
+    pub fn cancel_listing(&mut self, id: u64) {
+        let who = env::predecessor_account_id();
+        let i = self.listing_index(id);
+        require!(self.listings[i].seller == who, "That is not your notice");
+        let l = self.listings.remove(i);
+        self.return_to_seller(&l);
+        self.board_version += 1;
+        emit_game("unlisted", json!({ "id": id, "seller": who }));
+    }
+
+    /// Buy goods off the board: all of them, or `qty` of them. Attach
+    /// `unit_price` x `qty` (any extra is refunded). The NEAR goes straight to
+    /// the seller and the goods into your bag.
+    #[payable]
+    pub fn buy_listing(&mut self, id: u64, qty: Option<u32>) -> BoardSale {
+        let buyer = env::predecessor_account_id();
+        let i = self.listing_index(id);
+        let l = self.listings[i].clone();
+        require!(l.seller != buyer, "That is your own notice. Take it down instead.");
+        require!(env::block_timestamp_ms() <= l.expires_ms, "That notice has expired");
+        let qty = qty.unwrap_or(l.qty);
+        require!(qty > 0 && qty <= l.qty, "There are not that many for sale");
+        let total = l.unit_price.as_yoctonear() * qty as u128;
+        let paid = env::attached_deposit().as_yoctonear();
+        require!(paid >= total, "Attach the price");
+        let mut b = self.player(&buyer);
+        b.items[token_index(&l.token_id)] += qty;
+        b.trades += 1;
+        self.players.insert(buyer.clone(), b);
+        if paid > total {
+            Promise::new(buyer.clone()).transfer(NearToken::from_yoctonear(paid - total)).detach();
+        }
+        self.close_sale(i, &buyer, qty, total)
+    }
+
+    // ------------------------------------------------------------------
     // Merchant (the NPC's own key may call only these)
     // ------------------------------------------------------------------
 
@@ -584,18 +803,7 @@ impl Market {
         let now = env::block_timestamp_ms();
 
         if let Some(reason) = self.check_quote(&side, t, qty, total.as_yoctonear()) {
-            let blocked = Blocked {
-                player,
-                side,
-                token_id,
-                qty,
-                total,
-                reason: reason.to_string(),
-                timestamp_ms: now,
-            };
-            emit_game("quote_blocked", json!(blocked));
-            self.blocked_count += 1;
-            push_capped(&mut self.blocked, blocked, MAX_BLOCKED);
+            self.record_blocked(player, side, token_id, qty, total, reason);
             return QuoteResult {
                 status: "blocked".into(),
                 reason: Some(reason.to_string()),
@@ -683,6 +891,40 @@ impl Market {
             "export",
             json!({ "token_id": token_id, "qty": qty, "total": NearToken::from_yoctonear(pay) }),
         );
+    }
+
+    /// Buy goods off a player's notice, paid from the treasury. The guard
+    /// rails of a quote apply (price ceiling, spending cap, treasury, frozen),
+    /// and a refusal is recorded the same way instead of panicking.
+    pub fn shop_buy_listing(&mut self, id: u64, qty: u32) -> BoardBuyResult {
+        self.assert_merchant();
+        let i = self.listing_index(id);
+        let l = self.listings[i].clone();
+        require!(env::block_timestamp_ms() <= l.expires_ms, "That notice has expired");
+        require!(qty > 0 && qty <= l.qty, "There are not that many for sale");
+        let t = token_index(&l.token_id);
+        let total = l.unit_price.as_yoctonear() * qty as u128;
+        if let Some(reason) = self.check_quote(&Side::Buy, t, qty, total) {
+            self.record_blocked(l.seller, Side::Buy, l.token_id, qty, NearToken::from_yoctonear(total), reason);
+            return BoardBuyResult {
+                status: "blocked".into(),
+                reason: Some(reason.to_string()),
+                sale: None,
+            };
+        }
+        self.roll_window();
+        self.stock[t] += qty;
+        self.cost[t] += total;
+        self.treasury -= total;
+        self.total_purchases += total;
+        self.bought_in_window += total;
+        let merchant = self.merchant_id.clone();
+        let sale = self.close_sale(i, &merchant, qty, total);
+        BoardBuyResult {
+            status: "bought".into(),
+            reason: None,
+            sale: Some(sale),
+        }
     }
 
     // ------------------------------------------------------------------
@@ -810,6 +1052,10 @@ impl Market {
         if account_id == self.merchant_id {
             return U128(self.stock[t] as u128);
         }
+        if account_id == env::current_account_id() {
+            // goods waiting on the notice board
+            return U128(self.on_board(None)[t] as u128);
+        }
         U128(self.players.get(&account_id).map_or(0, |p| p.items[t] as u128))
     }
 
@@ -862,6 +1108,9 @@ impl Market {
             trade_count: self.trade_count,
             blocked_count: self.blocked_count,
             now_ms: now,
+            listing_count: self.listings.iter().filter(|l| now <= l.expires_ms).count() as u32,
+            board_sale_count: self.board_sale_count,
+            board_version: self.board_version,
         }
     }
 
@@ -883,6 +1132,11 @@ impl Market {
             "pickaxe_break_pct": PICKAXE_BREAK_PCT,
             "energy_max": self.energy_max,
             "energy_regen_sec": self.energy_regen_ms / 1000,
+            "board": {
+                "max_listings": MAX_LISTINGS,
+                "max_per_seller": MAX_LISTINGS_PER_SELLER,
+                "listing_ttl_sec": LISTING_TTL_MS / 1000,
+            },
         })
     }
 
@@ -919,6 +1173,18 @@ impl Market {
         let mut k = self.keepers.clone();
         k.sort_by_key(|k| k.took_ms);
         k
+    }
+
+    /// Every notice on the board, oldest first. Expired notices stay listed
+    /// (check `expires_ms`) until their goods go back to the seller.
+    pub fn get_listings(&self) -> Vec<Listing> {
+        self.listings.clone()
+    }
+
+    /// Latest sales off the board, newest first.
+    pub fn get_board_sales(&self, limit: Option<u32>) -> Vec<BoardSale> {
+        let n = limit.unwrap_or(20) as usize;
+        self.board_sales.iter().rev().take(n).cloned().collect()
     }
 }
 
@@ -974,7 +1240,103 @@ impl Market {
             trades: p.trades,
             joined_ms: p.joined_ms,
             lit_ms: p.lit_ms,
+            on_board: self.on_board(Some(id)).to_vec(),
         }
+    }
+
+    /// Items waiting on the board, in total or for one seller.
+    fn on_board(&self, seller: Option<&AccountId>) -> [u32; N] {
+        let mut n = [0u32; N];
+        for l in self.listings.iter().filter(|l| seller.map_or(true, |s| *s == l.seller)) {
+            n[token_index(&l.token_id)] += l.qty;
+        }
+        n
+    }
+
+    fn listing_index(&self, id: u64) -> usize {
+        self.listings
+            .iter()
+            .position(|l| l.id == id)
+            .unwrap_or_else(|| env::panic_str("That notice is no longer on the board"))
+    }
+
+    fn return_to_seller(&mut self, l: &Listing) {
+        let t = token_index(&l.token_id);
+        let mut p = self.player(&l.seller);
+        p.items[t] += l.qty;
+        self.players.insert(l.seller.clone(), p);
+        emit_mt(
+            "mt_transfer",
+            "old_owner_id",
+            &env::current_account_id(),
+            Some(("new_owner_id", &l.seller)),
+            &[(t, l.qty)],
+        );
+    }
+
+    /// Hand the goods on expired notices back to their sellers.
+    fn sweep_board(&mut self) {
+        let now = env::block_timestamp_ms();
+        let (expired, live): (Vec<Listing>, Vec<Listing>) =
+            std::mem::take(&mut self.listings).into_iter().partition(|l| now > l.expires_ms);
+        self.listings = live;
+        for l in expired.iter() {
+            self.return_to_seller(l);
+            emit_game("listing_expired", json!({ "id": l.id, "seller": l.seller }));
+        }
+        if !expired.is_empty() {
+            self.board_version += 1;
+        }
+    }
+
+    /// Take `qty` off notice `i` for `buyer` (who has already paid), pay the
+    /// seller and log the sale.
+    fn close_sale(&mut self, i: usize, buyer: &AccountId, qty: u32, total: u128) -> BoardSale {
+        let l = &mut self.listings[i];
+        l.qty -= qty;
+        let sale = BoardSale {
+            listing_id: l.id,
+            seller: l.seller.clone(),
+            buyer: buyer.clone(),
+            token_id: l.token_id.clone(),
+            qty,
+            total: NearToken::from_yoctonear(total),
+            timestamp_ms: env::block_timestamp_ms(),
+        };
+        if l.qty == 0 {
+            self.listings.remove(i);
+        }
+        let mut s = self.player(&sale.seller);
+        s.trades += 1;
+        self.players.insert(sale.seller.clone(), s);
+        Promise::new(sale.seller.clone()).transfer(sale.total).detach();
+        self.board_sale_count += 1;
+        self.board_version += 1;
+        emit_mt(
+            "mt_transfer",
+            "old_owner_id",
+            &env::current_account_id(),
+            Some(("new_owner_id", buyer)),
+            &[(token_index(&sale.token_id), qty)],
+        );
+        emit_game("board_sale", json!(sale));
+        push_capped(&mut self.board_sales, sale.clone(), MAX_BOARD_SALES);
+        sale
+    }
+
+    fn record_blocked(&mut self, player: AccountId, side: Side, token_id: String, qty: u32, total: NearToken, reason: &str) {
+        let blocked = Blocked {
+            player,
+            side,
+            token_id,
+            qty,
+            total,
+            reason: reason.to_string(),
+            timestamp_ms: env::block_timestamp_ms(),
+        };
+        emit_game("quote_blocked", json!(blocked));
+        self.blocked_count += 1;
+        push_capped(&mut self.blocked, blocked, MAX_BLOCKED);
     }
 
     /// Remove `qty` of a token from the shelves; returns its booked cost.
@@ -1434,5 +1796,298 @@ mod tests {
         let mut m = setup();
         ctx(merchant(), YOCTO, 1000);
         m.set_policy(policy());
+    }
+
+    // ---------------- the notice board ----------------
+
+    fn contract() -> AccountId {
+        acc("market.owner.test")
+    }
+    fn carol() -> AccountId {
+        acc("carol.test")
+    }
+    const DAY_SEC: u64 = 24 * 60 * 60;
+
+    fn give(m: &mut Market, who: AccountId, t: usize, n: u32) {
+        let mut p = m.players.get(&who).cloned().unwrap();
+        p.items[t] += n;
+        m.players.insert(who, p);
+        m.supply[t] += n as u64;
+    }
+
+    fn join(m: &mut Market, who: AccountId) {
+        ctx(who, ZERO, 1000);
+        m.join();
+    }
+
+    fn list(m: &mut Market, who: AccountId, token: &str, qty: u32, price: u128, ts: u64) -> Listing {
+        ctx(who, ZERO, ts);
+        m.list_item(token.into(), qty, coins(price))
+    }
+
+    /// NEAR sent out by the last call, as (receiver, amount).
+    fn transfers() -> Vec<(AccountId, NearToken)> {
+        near_sdk::test_utils::get_created_receipts()
+            .into_iter()
+            .flat_map(|r| {
+                let to = r.receiver_id.clone();
+                r.actions.into_iter().filter_map(move |a| match a {
+                    near_sdk::mock::MockAction::Transfer { deposit, .. } => Some((to.clone(), deposit)),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// Every item is in a player's bag, on the merchant's shelves or on the board.
+    fn assert_supply_adds_up(m: &Market, players: &[AccountId]) {
+        for token in TOKENS {
+            let held: u128 = players.iter().map(|p| m.mt_balance_of(p.clone(), token.into()).0).sum();
+            let shop = m.mt_balance_of(merchant(), token.into()).0;
+            let board = m.mt_balance_of(contract(), token.into()).0;
+            assert_eq!(held + shop + board, m.mt_supply(token.into()).unwrap().0, "{token}");
+        }
+    }
+
+    #[test]
+    fn pinning_a_notice_puts_the_goods_in_escrow_and_taking_it_down_returns_them() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 10);
+        let l = list(&mut m, alice(), "kelp", 6, 5, 1000);
+        assert_eq!((l.qty, l.unit_price, l.expires_ms), (6, coins(5), (1000 + DAY_SEC) * 1000));
+        assert_eq!(items(&m, alice())[KELP], 4);
+        assert_eq!(m.get_player(alice()).unwrap().on_board[KELP], 6);
+        assert_eq!(m.mt_balance_of(contract(), "kelp".into()).0, 6);
+        let before = m.get_market();
+        assert_eq!(before.listing_count, 1);
+        assert_supply_adds_up(&m, &[alice()]);
+
+        ctx(alice(), ZERO, 1001);
+        m.cancel_listing(l.id);
+        assert_eq!(items(&m, alice())[KELP], 10);
+        assert!(m.get_listings().is_empty());
+        assert!(m.get_market().board_version > before.board_version);
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    #[test]
+    fn a_player_buys_off_the_board_and_the_seller_gets_paid() {
+        let mut m = setup();
+        give(&mut m, alice(), PICKAXE, 1);
+        join(&mut m, bob());
+        let l = list(&mut m, alice(), "pickaxe", 1, 45, 1000);
+        ctx(bob(), coins(50), 1010);
+        let sale = m.buy_listing(l.id, None);
+        // the seller gets the price, the buyer gets the change
+        let paid = transfers();
+        assert!(paid.contains(&(alice(), coins(45))), "{paid:?}");
+        assert!(paid.contains(&(bob(), coins(5))), "{paid:?}");
+        assert_eq!((sale.seller.clone(), sale.buyer.clone(), sale.total), (alice(), bob(), coins(45)));
+        assert_eq!(items(&m, bob())[PICKAXE], 1);
+        assert!(m.get_listings().is_empty());
+        assert_eq!(m.get_board_sales(None), vec![sale]);
+        let mv = m.get_market();
+        assert_eq!(mv.board_sale_count, 1);
+        assert_eq!(mv.treasury, coins(1000), "the merchant's books are not involved");
+        assert_eq!(m.get_player(alice()).unwrap().trades, 1);
+        assert_eq!(m.get_player(bob()).unwrap().trades, 1);
+        assert_supply_adds_up(&m, &[alice(), bob()]);
+    }
+
+    #[test]
+    fn buying_part_of_a_notice_leaves_the_rest_up() {
+        let mut m = setup();
+        give(&mut m, alice(), ORE, 5);
+        join(&mut m, bob());
+        let l = list(&mut m, alice(), "ore", 5, 30, 1000);
+        ctx(bob(), coins(60), 1010);
+        m.buy_listing(l.id, Some(2));
+        assert!(transfers().contains(&(alice(), coins(60))));
+        assert_eq!(m.get_listings()[0].qty, 3);
+        assert_eq!(items(&m, bob())[ORE], 2);
+        assert_supply_adds_up(&m, &[alice(), bob()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Attach the price")]
+    fn underpaying_for_a_notice_fails() {
+        let mut m = setup();
+        give(&mut m, alice(), ORE, 5);
+        join(&mut m, bob());
+        let l = list(&mut m, alice(), "ore", 5, 30, 1000);
+        ctx(bob(), coins(149), 1010);
+        m.buy_listing(l.id, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "That is your own notice")]
+    fn you_cannot_buy_your_own_notice() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 3);
+        let l = list(&mut m, alice(), "kelp", 3, 5, 1000);
+        ctx(alice(), coins(15), 1010);
+        m.buy_listing(l.id, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "That is not your notice")]
+    fn only_the_seller_can_take_a_notice_down() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 3);
+        let l = list(&mut m, alice(), "kelp", 3, 5, 1000);
+        join(&mut m, bob());
+        ctx(bob(), ZERO, 1010);
+        m.cancel_listing(l.id);
+    }
+
+    #[test]
+    #[should_panic(expected = "You do not have that many")]
+    fn you_cannot_pin_goods_you_do_not_have() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 3);
+        list(&mut m, alice(), "kelp", 4, 5, 1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "You already have 3 notices up")]
+    fn three_notices_per_player() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 10);
+        for i in 0..4 {
+            list(&mut m, alice(), "kelp", 1, 5, 1000 + i);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "The notice board is full")]
+    fn the_board_holds_forty_notices() {
+        let mut m = setup();
+        for i in 0..14 {
+            let who = acc(&format!("p{i}.test"));
+            join(&mut m, who.clone());
+            give(&mut m, who.clone(), KELP, 3);
+            for j in 0..3 {
+                list(&mut m, who.clone(), "kelp", 1, 5, 1000 + j);
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "That notice has expired")]
+    fn expired_notices_cannot_be_bought() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 3);
+        let l = list(&mut m, alice(), "kelp", 3, 5, 1000);
+        join(&mut m, bob());
+        ctx(bob(), coins(15), 1000 + DAY_SEC + 1);
+        m.buy_listing(l.id, None);
+    }
+
+    #[test]
+    fn expired_notices_go_back_to_their_sellers() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 3);
+        list(&mut m, alice(), "kelp", 3, 5, 1000);
+        assert_eq!(items(&m, alice())[KELP], 0);
+        // still pinned, and still counted, until someone uses the board again
+        ctx(alice(), ZERO, 1000 + DAY_SEC + 1);
+        assert_eq!(m.get_market().listing_count, 0);
+        assert_eq!(m.get_listings().len(), 1);
+        join(&mut m, bob());
+        give(&mut m, bob(), ORE, 1);
+        list(&mut m, bob(), "ore", 1, 30, 1000 + DAY_SEC + 2);
+        assert_eq!(items(&m, alice())[KELP], 3);
+        let left = m.get_listings();
+        assert_eq!((left.len(), left[0].seller.clone()), (1, bob()));
+        assert_supply_adds_up(&m, &[alice(), bob()]);
+    }
+
+    #[test]
+    fn the_merchant_buys_off_the_board_from_her_treasury() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 6);
+        let l = list(&mut m, alice(), "kelp", 6, 2, 1000);
+        ctx(merchant(), ZERO, 1010);
+        let r = m.shop_buy_listing(l.id, 6);
+        assert_eq!(r.status, "bought");
+        assert!(transfers().contains(&(alice(), coins(12))));
+        assert_eq!(r.sale.unwrap().buyer, merchant());
+        let mv = m.get_market();
+        assert_eq!(mv.stock[KELP], 6);
+        assert_eq!(mv.treasury, coins(988));
+        assert_eq!(mv.avg_cost[KELP], coins(2));
+        assert_eq!(mv.bought_in_window, coins(12));
+        assert_eq!(mv.board_sale_count, 1);
+        assert!(m.get_listings().is_empty());
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    #[test]
+    fn the_merchants_board_buys_obey_the_guard_rails() {
+        let mut m = setup();
+        give(&mut m, alice(), PEARL, 3);
+        give(&mut m, alice(), KELP, 3);
+        // the pearl ceiling is 160 coins: a notice at 500 each is refused and logged
+        let l = list(&mut m, alice(), "pearl", 3, 500, 1000);
+        ctx(merchant(), ZERO, 1010);
+        let r = m.shop_buy_listing(l.id, 3);
+        assert_eq!((r.status.as_str(), r.reason.as_deref()), ("blocked", Some("above_price_ceiling")));
+        assert!(transfers().is_empty());
+        assert_eq!(m.get_listings()[0].qty, 3, "the notice stays up");
+        assert_eq!(m.get_blocked(None)[0].player, alice());
+        // a frozen merchant buys nothing
+        let k = list(&mut m, alice(), "kelp", 3, 2, 1020);
+        ctx(owner(), YOCTO, 1030);
+        m.freeze();
+        ctx(merchant(), ZERO, 1040);
+        assert_eq!(m.shop_buy_listing(k.id, 3).reason.as_deref(), Some("frozen"));
+        assert_eq!(m.get_market().treasury, coins(1000));
+    }
+
+    #[test]
+    #[should_panic(expected = "Merchant only")]
+    fn players_cannot_buy_with_the_merchants_treasury() {
+        let mut m = setup();
+        give(&mut m, alice(), KELP, 3);
+        let l = list(&mut m, alice(), "kelp", 3, 2, 1000);
+        join(&mut m, carol());
+        ctx(carol(), ZERO, 1010);
+        m.shop_buy_listing(l.id, 3);
+    }
+
+    // ---------------- upgrade ----------------
+
+    /// The state of the live testnet contract (market.tidewater-f2b962.testnet),
+    /// saved just before the notice board was added.
+    const LIVE_V1_STATE: &[u8] = include_bytes!("../tests/fixtures/v1_state.bin");
+
+    #[test]
+    fn migrate_keeps_the_live_v1_state() {
+        ctx(contract(), ZERO, 1_794_600_000);
+        env::storage_write(b"STATE", LIVE_V1_STATE);
+        let m = Market::migrate();
+        let mv = m.get_market();
+        assert_eq!(mv.owner_id, acc("tidewater-f2b962.testnet"));
+        assert_eq!(mv.merchant_id, acc("maren.tidewater-f2b962.testnet"));
+        assert_eq!((mv.player_count, mv.trade_count, mv.blocked_count), (10, 77, 8));
+        assert_eq!(mv.stock, vec![9, 9, 2, 3, 3, 2, 1, 1]);
+        assert_eq!(m.get_trades(Some(100)).len(), MAX_TRADES);
+        assert_eq!(m.get_keepers().len(), 2);
+        assert_eq!(m.get_policy().ceiling[BOAT], coins(240));
+        assert_eq!((mv.listing_count, mv.board_version), (0, 0));
+        // the upgraded state saves and loads again
+        env::state_write(&m);
+        let again: Market = env::state_read().unwrap();
+        assert_eq!(again.get_market().trade_count, 77);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot deserialize")]
+    fn migrate_refuses_to_run_twice() {
+        ctx(contract(), ZERO, 1_794_600_000);
+        env::storage_write(b"STATE", LIVE_V1_STATE);
+        let m = Market::migrate();
+        env::state_write(&m);
+        Market::migrate();
     }
 }
