@@ -49,6 +49,7 @@
   #goal li.done::before { content: "●"; }
   #goal li.now { color: var(--ink); font-weight: 600; }
   #goal li.now::before { content: "➤"; color: var(--red); }
+  #goal-note { margin: 7px 0 0; font-size: 12px; color: var(--ink-2); }
   #help { left: 280px; bottom: 16px; color: rgba(255, 255, 255, .8); font-size: 12.5px; text-shadow: 0 1px 3px rgba(0, 0, 0, .6); }
   kbd { background: rgba(255, 255, 255, .16); border-radius: 4px; padding: 1px 5px; font: inherit; }
   #ledger-btn { right: 14px; bottom: 14px; padding: 8px 12px; font-size: 13px; }
@@ -234,8 +235,9 @@
 </div>
 <div id="inv" class="hud card" hidden></div>
 <div id="goal" class="hud card" hidden>
-  <h3>Relight the lighthouse</h3>
+  <h3 id="goal-title">Relight the lighthouse</h3>
   <ol id="steps"></ol>
+  <p id="goal-note" hidden></p>
 </div>
 <div id="help" class="hud" hidden><kbd>WASD</kbd> or click to walk · <kbd>E</kbd> to use what's nearby</div>
 <button id="ledger-btn" class="hud card" hidden title="See what is happening on the NEAR blockchain">⛓ Ledger</button>

@@ -88,6 +88,14 @@ When you are done, your boat and pickaxe can go on the board for the next newcom
 
 **How long it takes.** At the rates above, energy alone would allow the whole arc in about five minutes. Walking, signing, prices that fall as you sell, broken pickaxes and waiting for her to craft make it longer. We have not measured how long real players take.
 
+**After the lighthouse: the storm goals.** That arc can be over before the first storm, so lighting the lighthouse turns the goal list into "Storm keeper", with three goals only the weather allows:
+
+1. have pearls in your bag when a storm blows in;
+2. sell a pearl to Maren while it blows (she pays ×1.25 then);
+3. find a pearl in the storm wrack on the shore (one shore trip in eight, in a storm).
+
+The card counts down to the next storm. The goals never stand between a player and the lighthouse, so nobody has to wait half an hour to finish the game. They are kept in the browser, like the rest of the goal list.
+
 ## What the market does between your trips
 
 The market keeps moving whether or not you are at the stall:

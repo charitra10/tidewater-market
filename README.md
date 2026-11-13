@@ -64,6 +64,7 @@ node scripts/play.mjs --full   # ~8 min: keep going to the boat, the reef, the b
 3. **Buy.** She sells pickaxes, a boat and the beacon lens, but only if she has them. Everything on her shelf is crafted from what players sold her: 3 kelp make a rope; 2 driftwood and a rope make a pickaxe; a boat takes driftwood, rope and ore; the beacon takes pearls, ore and rope. If the boat is sold out, the stall shows what she is missing, and bringing it to her is how the boat gets built.
 4. **Trade with other players** on the notice board. A spare pickaxe, a boat you no longer need, ore at a better price than Maren pays: pin it, and whoever buys it pays you directly. Maren doesn't buy tools back at her stall, so the board is the only place to sell a used one.
 5. **Light the lighthouse** with the beacon lens. Your time goes on the keepers' board. Your boat and pickaxe can then go on the board for the next newcomer.
+6. **Become a storm keeper.** Once the lighthouse is lit, the goal list asks for three things only the weather allows: have pearls in your bag when a storm blows in, sell a pearl to Maren while it blows, and find a pearl in the storm wrack. It counts down to the next storm.
 
 The same loop at four timescales. The full version, with the yield tables and the prices behind each choice, is in [`docs/GAME_LOOP.md`](docs/GAME_LOOP.md).
 
@@ -72,7 +73,7 @@ The same loop at four timescales. The full version, with the yield tables and th
 | **30 seconds** | make a trip or two: forage, walk to Maren, Silas or the board, sell or haggle. Sell now, or hold? | Energy: 12 at most, 1 back every 6 s, so about 5 points (five shore trips, two cliff runs or one reef trip) every 30 s |
 | **5 minutes** | gather at low water, sell kelp and pearls at high water; pick Maren or Silas by how full his hold is; check the board | Half a tide. Each tide lasts 10 minutes in four parts of 2½ minutes, and every third one is a spring tide |
 | **30 minutes** | hold pearls back before the storm, comb the wrack during it, sell pearls high while the reef is shut | One 4-minute storm per half hour, forecast on the tide card |
-| **session** | pickaxe (about 60 coins), then the cliffs; boat (about 240), then the reef; beacon lens (about 600), then the lighthouse | A guest starts with about 29 coins; prices move with what every player has bought and sold |
+| **session** | pickaxe (about 60 coins), then the cliffs; boat (about 240), then the reef; beacon lens (about 600), then the lighthouse; after that, the storm goals | A guest starts with about 29 coins; prices move with what every player has bought and sold |
 
 ![The lighthouse, relit](docs/lighthouse.jpg)
 
@@ -194,7 +195,7 @@ Main contract methods:
 - **Recent demand only sees her last 40 deals.** The contract keeps 40, so on a very busy market the window is "the last 40 deals or the last tide, whichever is shorter". It counts deals at her counter, not what she buys off the notice board.
 - **Why a merchant pinned a notice is kept in the server's memory.** After a restart, the board shows a general reason for notices pinned before it.
 - **Price history lives in the server's memory.** The price lines show the last 60 samples the server took (one per price change, or every 6 seconds while prices hold, so a few minutes of play); restarting the server starts them fresh. The trade ticker and the keepers' board come from the contract and survive restarts.
-- **Guest accounts are sponsored.** The server pays 0.13 testnet NEAR per new guest and limits how many it creates per hour. A guest's key lives in that browser's storage; clearing it loses the account. There is no wallet or social login yet.
+- **Guest accounts are sponsored.** The server pays 0.13 testnet NEAR per new guest and limits how many it creates per hour. A guest's key lives in that browser's storage; clearing it loses the account. The goal list, storm goals included, is kept there too. There is no wallet or social login yet.
 - **The haggling endpoint does not check who is asking.** Someone could open a haggle in another player's name. They could not take the deal: only the named player's key can accept a quote.
 - **Foraging randomness** comes from the block's random seed. That is fine for kelp, not for anything valuable.
 - **There is one dealer, not any number of merchants.** Silas has his own slot in the contract; a third merchant would need another.

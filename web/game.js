@@ -364,12 +364,16 @@ function renderTide() {
 
   // the weather news
   if (started && lastStorm) {
-    if (!lastStorm.active && storm.active) toast(STORM_NEWS.start, false, 7000);
+    if (!lastStorm.active && storm.active) {
+      toast(STORM_NEWS.start, false, 7000);
+      if (pv?.items[idx("pearl")] > 0) stormGoal("stormHeld");
+    }
     else if (lastStorm.active && !storm.active) toast(STORM_NEWS.end, false, 7000);
     else if (!storm.active && storm.startMs - now <= 180_000 && warnedFor !== storm.startMs) toast(STORM_NEWS.warn, false, 7000);
     if (lastStorm.active !== storm.active && S.shopOpen) renderShop();
   }
   if (!storm.active && storm.startMs - now <= 180_000) warnedFor = storm.startMs; // (no warning for a storm already upon you)
+  if (pv?.lit_ms > 0) renderGoals(); // the countdown to the next storm
   lastStorm = storm;
 
   // say so when the water turns (but not for the tide you arrived on)
@@ -618,15 +622,53 @@ function renderHud() {
     }
   }
   if (changed) localStorage.setItem(SAVE, JSON.stringify(save));
-  const steps = [
-    ["Comb the shore, sell to Maren", pv.trades > 0],
-    ["Buy a pickaxe, mine the cliffs", f.pickaxe],
-    ["Buy a boat, find pearls on the reef", f.boat],
-    ["Buy the beacon lens", f.beacon || pv.lit_ms > 0],
-    ["Light the lighthouse", pv.lit_ms > 0],
-  ];
+  renderGoals();
+}
+
+// The goal card. First the way to the lighthouse; once it is lit, the storm
+// goals, which a player can only meet by watching the weather. They are kept
+// in this browser, like the rest of the goal list.
+const STORM_GOALS = [
+  ["stormHeld", "Have pearls in your bag when a storm blows in"],
+  ["stormSold", "Sell a pearl to Maren while the storm blows"],
+  ["stormWrack", "Find a pearl in the storm wrack on the shore"],
+];
+function renderGoals() {
+  if (!pv || !save) return;
+  const f = save.flags;
+  const lit = pv.lit_ms > 0;
+  const steps = lit
+    ? STORM_GOALS.map(([key, text]) => [text, Boolean(f[key])])
+    : [
+        ["Comb the shore, sell to Maren", pv.trades > 0],
+        ["Buy a pickaxe, mine the cliffs", f.pickaxe],
+        ["Buy a boat, find pearls on the reef", f.boat],
+        ["Buy the beacon lens", f.beacon],
+        ["Light the lighthouse", false],
+      ];
   const now = steps.findIndex(([, done]) => !done);
+  $("goal-title").textContent = lit ? (now < 0 ? "Storm keeper ✓" : "Storm keeper") : "Relight the lighthouse";
   $("steps").innerHTML = steps.map(([text, done], i) => `<li class="${done ? "done" : i === now ? "now" : ""}">${text}</li>`).join("");
+  let note = "";
+  if (lit) {
+    const st = stormAt(nowMs());
+    note = now < 0 ? "You know these waters. " : "";
+    note += st.active ? `Storm blowing: ${mmss(st.endsMs - nowMs())} left.` : `Next storm in ${mmss(st.startMs - nowMs())}.`;
+  }
+  $("goal-note").textContent = note;
+  $("goal-note").hidden = !note;
+}
+/// Tick off a storm goal (once), and say so.
+function stormGoal(key) {
+  if (!save || save.flags[key]) return;
+  save.flags[key] = true;
+  localStorage.setItem(SAVE, JSON.stringify(save));
+  if (pv?.lit_ms > 0) {
+    const all = STORM_GOALS.every(([k]) => save.flags[k]);
+    toast(all ? "Storm keeper! You've read the weather and come out ahead." : `Storm goal: ${STORM_GOALS.find(([k]) => k === key)[1].toLowerCase()}. Done!`, false, 6000);
+    sfx.coin();
+  }
+  renderGoals();
 }
 function renderEnergy() {
   if (!pv) return;
@@ -671,6 +713,7 @@ async function forage(h) {
       if (qty > 0) float(`+${qty} ${NAMES[TOKENS[i]].toLowerCase()}`, TOKENS[i], { ...at, wait: n++ * 0.35 });
     });
     sfx.found();
+    if (h.id === "shore" && r.storm && r.found[idx("pearl")] > 0) stormGoal("stormWrack");
     if (r.tool_broke) {
       float("Your pickaxe broke!", "pickaxe", { bad: true, wait: n * 0.35 });
       toast("Snap! Your pickaxe broke. Maren will sell you another.", true);
@@ -933,6 +976,7 @@ async function settle(deal) {
     float(`${buying ? "−" : "+"}${deal.coins}`, "coin");
     if (buying) float(`+${deal.qty} ${NAMES[deal.token].toLowerCase()}`, deal.token, { wait: 0.35 });
     delete sellQty[deal.token];
+    if (!buying && deal.token === "pearl" && stormAt(nowMs()).active) stormGoal("stormSold");
   } catch (e) {
     toast(e.message, true);
   } finally {
