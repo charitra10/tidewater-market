@@ -192,11 +192,20 @@ else {
   else {
     const rope = (await call("player_craft", { token_id: "rope" })).value;
     say("me", `twisted 3 kelp into rope  [energy ${rope.energy_left}]`);
-    const mid = await player();
+    // (views read finalised blocks, a moment behind the transaction: wait for the change to show)
+    const settled = async (ok) => {
+      for (let i = 0; i < 10; i++) {
+        const q = await player();
+        if (ok(q)) return q;
+        await sleep(1000);
+      }
+      return player();
+    };
+    const mid = await settled((q) => have(q, "rope") !== have(before, "rope"));
     check(have(mid, "rope") === have(before, "rope") + 1 && have(mid, "kelp") === have(before, "kelp") - 3, "made rope at the workbench from 3 kelp");
     const pick = (await call("player_craft", { token_id: "pickaxe" })).value;
     say("me", `made a pickaxe from 2 driftwood and the rope  [energy ${pick.energy_left}]`);
-    const after = await player();
+    const after = await settled((q) => have(q, "pickaxe") !== have(before, "pickaxe"));
     check(have(after, "pickaxe") === have(before, "pickaxe") + 1 && have(after, "rope") === have(before, "rope") && pick.energy_left === rope.energy_left - 2,
       "made my own pickaxe (2 energy), so now I own one more");
     const boat = await call("player_craft", { token_id: "boat" }).then(() => "made", (e) => e.message);

@@ -11,6 +11,7 @@ This is the design as it stands in the game today. It was written up after the c
 | **30 seconds** | One or two trips: forage, walk to a buyer, sell or haggle. Sell now, or hold? | Energy: 12 at most, 1 back every 6 s |
 | **5 minutes** | Half a tide. Gather while the water is low, sell while it is high. Choose Maren or Silas, check the notice board. | The tide: 10 minutes, four parts of 2½ minutes, every third tide a spring tide |
 | **30 minutes** | One storm, forecast in advance. Hold pearls back before it, comb the wrack during it. | The storm clock: one 4-minute storm per half hour, at a time anyone can work out |
+| **Hour** | One event: sell kelp before a red tide, gamble on the reef in fog, comb a shipwreck, sell pearls at the festival, row out in a calm. | The event clock: one event an hour for one whole tide, forecast half an hour ahead |
 | **Session** | Pickaxe, then the cliffs. Boat, then the reef. Beacon lens, then the lighthouse and the keepers' board. | Prices that move with the merchants' stock and money |
 
 ## Every 30 seconds: one trip
@@ -58,7 +59,7 @@ Over a whole tide her offers average out to her ordinary price, so the tide rewa
 
 ## Every 30 minutes: a storm
 
-Exactly one storm blows in each half hour, for 4 minutes, starting 0, 2, 4 … or 24 minutes in. The start is picked by a public hash of the clock (`storm_at` and `mix32` in the contract, `stormAt` in [`web/tide.js`](../web/tide.js)), so anyone can forecast it, and the tide card does.
+One storm blows in each half hour (unless a calm holds it off: see below), for 4 minutes, starting 0, 2, 4 … or 24 minutes in. The start is picked by a public hash of the clock (`storm_at` and `mix32` in the contract, `stormAt` in [`web/tide.js`](../web/tide.js)), so anyone can forecast it, and the tide card does.
 
 While it blows:
 
@@ -69,6 +70,22 @@ While it blows:
 - Maren pays ×1.25 for pearls (62 coins on an everyday shelf) and ×0.75 for driftwood.
 
 So the half hour has its own plan. **Before the storm:** keep pearls back. **During it:** comb the shore for wrack and sell pearls high, since nobody can fetch new ones. **After it:** the reef reopens and pearl prices fall back.
+
+## Every hour: an event
+
+Once an hour, for one whole tide (10 minutes), something happens. It is picked by a public hash of the hour, like the storms (`event_at` in the contract, `eventAt` in [`web/tide.js`](../web/tide.js)), and the tide card forecasts it half an hour ahead, with a warning 3 minutes before.
+
+| Event | What it does | What a player does about it |
+|---|---|---|
+| Fog | Each reef trip finds no pearls at all, or a haul (twice the usual and one more) | Gamble, or wait it out |
+| Red tide | No kelp worth keeping anywhere; Maren and the mainland won't buy any | Sell your kelp before it comes; forage driftwood meanwhile |
+| Shipwreck | Shore trips turn up rope (1 in 3), ore (1 in 6), now and then a whole boat (1 in 50) | Comb the shore hard: rope and ore without the cliffs |
+| Lantern festival | Maren asks 25% more for a beacon lens and pays 10% more for pearls | Sell pearls; don't buy the lens now |
+| Calm | An extra pearl on every reef trip, and that hour's first storm never comes | Row out to the reef |
+
+## Making your own tools
+
+The workbench by the cottage (`player_craft` in the contract) makes rope (3 kelp, 1 energy) and pickaxes (2 driftwood and a rope, 2 energy). At everyday prices a home-made pickaxe costs about 15 coins of goods plus 3 energy, against Maren's 60. That is the make-or-buy choice: coins or time. It gives a new player a second way onto the cliffs, and spare pickaxes can go on the notice board. Boats and beacon lenses are Maren's work only.
 
 ## Every session: the arc
 
