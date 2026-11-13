@@ -28,11 +28,11 @@ node server/server.js       # opens the shop
 Then visit **http://localhost:8787** and press **Step ashore**. There is nothing to install in the browser and nothing to sign: the game gives you a guest account. There are no npm packages to install either.
 
 - **Walk** with `WASD` / arrow keys, or click where you want to go.
-- **Use** what is nearby with `E` (or click it): the tide pools, the cliffs, the pier, Maren's stall, the lighthouse.
+- **Use** what is nearby with `E` (or click it): the tide pools, the cliffs, the pier, Maren's stall, the lighthouse. On a touch screen, tap where you want to go; a **Use** button appears when you are next to something.
 - At the stall, pick something to buy or sell, then **make an offer**, **take her price**, **walk away**, or just **type to her**.
 - At the **notice board** (by the cottage), buy what other players are selling, or pin your own goods at your own price.
 - The **tide clock** (under your bag) shows the tide, what it does, what is coming and when the next storm is due. Click it for the tide table.
-- The **Ledger** button (bottom right) shows what happened on-chain, for the curious.
+- The **Ledger** button (bottom right) shows what happened on-chain, for the curious. Next to it is the **sound** switch: the surf swells with the tide, and storms bring rain and thunder (all made in the browser, no sound files).
 
 To watch the whole loop without a browser, a bot can play it for you. It uses the same signing code as the game:
 

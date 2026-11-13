@@ -52,6 +52,14 @@
   #help { left: 280px; bottom: 16px; color: rgba(255, 255, 255, .8); font-size: 12.5px; text-shadow: 0 1px 3px rgba(0, 0, 0, .6); }
   kbd { background: rgba(255, 255, 255, .16); border-radius: 4px; padding: 1px 5px; font: inherit; }
   #ledger-btn { right: 14px; bottom: 14px; padding: 8px 12px; font-size: 13px; }
+  #mute { right: 104px; bottom: 14px; padding: 6px 9px; color: var(--ink); cursor: pointer; display: grid; place-items: center; }
+  #use { right: 14px; bottom: 62px; padding: 11px 18px; border: 0; border-radius: 14px; background: var(--teal); color: #fff; font: inherit; box-shadow: var(--shadow); display: flex; flex-direction: column; align-items: flex-start; gap: 1px; cursor: pointer; }
+  #use b { font-size: 16px; }
+  #use small { font-size: 12px; opacity: .85; }
+  @media (min-width: 761px) {
+    /* the stall panel sits on the right: the bag and the tide card step out from under it */
+    body.shop-open #inv, body.shop-open #tide { right: calc(min(430px, 100vw - 24px) + 24px); }
+  }
   #ticker { top: 66px; left: 14px; max-width: min(460px, calc(100vw - 28px)); padding: 6px 12px 6px 9px; display: flex; align-items: center; gap: 7px; font-size: 13px; }
   #ticker-icon svg { width: 18px; height: 18px; }
   #ticker-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -215,6 +223,8 @@
 </div>
 <div id="help" class="hud" hidden><kbd>WASD</kbd> or click to walk · <kbd>E</kbd> to use what's nearby</div>
 <button id="ledger-btn" class="hud card" hidden title="See what is happening on the NEAR blockchain">⛓ Ledger</button>
+<button id="mute" class="hud card" hidden title="Sound on (click to mute)"></button>
+<button id="use" class="hud" hidden></button>
 <div id="ticker" class="hud card" hidden title="What other players have been doing, from the contract's trade log"><span id="ticker-icon"></span><span id="ticker-text"></span><span id="ticker-when"></span></div>
 <div id="tide" class="hud card" hidden title="The tide turns every 10 minutes. Click for the tide table.">
   <div class="top"><span id="tide-icon"></span><span id="tide-name"></span><span id="tide-when"></span></div>

@@ -6,7 +6,7 @@
 
 import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "./near-lite.js";
 import { TOKENS, NAMES, BLURB, ICONS } from "./icons.js";
-import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld } from "./world.js";
+import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld, lightningAt } from "./world.js";
 import { tideAt, tideHeight, tideBidFactor, nextTide, tideName, TIDE_TEXT, TIDE_PERIOD_MS, stormAt, stormLevel, stormBidFactor, STORM_TEXT } from "./tide.js";
 
 const $ = (id) => document.getElementById(id);
@@ -55,9 +55,17 @@ async function api(path, body) {
   return j;
 }
 
-// ---------- sound (tiny synth blips, no files) ----------
+// ---------- sound (tiny synth blips and a sea made of noise; no files) ----------
 let audio = null;
+const MUTE = "tidewater.muted";
+let muted = false;
+try {
+  muted = localStorage.getItem(MUTE) === "1";
+} catch {
+  /* no storage: sound on */
+}
 function blip(freqs, dur = 0.09, type = "triangle", vol = 0.07) {
+  if (muted) return;
   try {
     audio ??= new AudioContext();
     freqs.forEach((f, i) => {
@@ -76,6 +84,96 @@ function blip(freqs, dur = 0.09, type = "triangle", vol = 0.07) {
     /* no sound, no problem */
   }
 }
+/// The sea: brown noise through a low-pass filter, swelling like waves (louder
+/// at high tide and in a storm), rain in a storm, and thunder after lightning.
+let amb = null;
+function noise(seconds, brown) {
+  const buf = audio.createBuffer(1, audio.sampleRate * seconds, audio.sampleRate);
+  const d = buf.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < d.length; i++) {
+    const white = Math.random() * 2 - 1;
+    if (brown) {
+      last = (last + 0.02 * white) / 1.02;
+      d[i] = last * 3.5;
+    } else d[i] = white;
+  }
+  return buf;
+}
+function startAmbient() {
+  if (muted || amb) return;
+  try {
+    audio ??= new AudioContext();
+    audio.resume();
+    const master = audio.createGain();
+    master.gain.setValueAtTime(0, audio.currentTime);
+    master.gain.linearRampToValueAtTime(1, audio.currentTime + 3); // fade in
+    master.connect(audio.destination);
+    const loop = (buffer, filter, freq) => {
+      const src = audio.createBufferSource();
+      src.buffer = buffer;
+      src.loop = true;
+      const f = audio.createBiquadFilter();
+      f.type = filter;
+      f.frequency.value = freq;
+      const g = audio.createGain();
+      g.gain.value = 0;
+      src.connect(f).connect(g).connect(master);
+      src.start();
+      return { f, g };
+    };
+    const brown = noise(6, true);
+    amb = { master, brown, surf: loop(brown, "lowpass", 500), rain: loop(noise(3, false), "highpass", 1400), at: 0, flash: false };
+  } catch {
+    amb = null; // no Web Audio: a silent sea
+  }
+}
+function updateAmbient(t) {
+  if (!amb || muted || t - amb.at < 0.1) return;
+  amb.at = t;
+  const now = audio.currentTime;
+  const wave = Math.pow(0.5 + 0.5 * Math.sin((t * 2 * Math.PI) / 7), 2); // a wave every 7 seconds
+  const rough = S.storm.level;
+  amb.surf.g.gain.setTargetAtTime((0.035 + 0.06 * wave) * (1 + 0.12 * S.tide.height) * (1 + 1.3 * rough), now, 0.25);
+  amb.surf.f.frequency.setTargetAtTime(380 + 420 * wave + 700 * rough, now, 0.25);
+  amb.rain.g.gain.setTargetAtTime(0.05 * rough, now, 0.5);
+  // thunder a moment after each flash of lightning
+  const flash = lightningAt(t, rough) > 0;
+  if (flash && !amb.flash) thunder();
+  amb.flash = flash;
+}
+function thunder() {
+  const src = audio.createBufferSource();
+  src.buffer = amb.brown;
+  const lp = audio.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.value = 160;
+  const g = audio.createGain();
+  const t0 = audio.currentTime + 0.4 + Math.random() * 0.8;
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(0.6, t0 + 0.12);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + 3.2);
+  src.connect(lp).connect(g).connect(amb.master);
+  src.start(t0, Math.random() * 3);
+  src.stop(t0 + 3.4);
+}
+function setMuted(on) {
+  muted = on;
+  try {
+    localStorage.setItem(MUTE, on ? "1" : "0");
+  } catch {
+    /* remembered for this visit only */
+  }
+  $("mute").innerHTML = on ? SPEAKER_OFF : SPEAKER_ON;
+  $("mute").title = on ? "Sound off (click to turn it on)" : "Sound on (click to mute)";
+  if (on) audio?.suspend();
+  else if (amb) audio.resume();
+  else startAmbient();
+}
+const SPEAKER = `<path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/>`;
+const SPEAKER_ON = `<svg viewBox="0 0 24 24" width="18" height="18">${SPEAKER}<path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
+const SPEAKER_OFF = `<svg viewBox="0 0 24 24" width="18" height="18">${SPEAKER}<path d="M16.5 9.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
+
 const sfx = {
   found: () => blip([520, 660]),
   coin: () => blip([880, 1175, 1568], 0.07, "square", 0.04),
@@ -419,7 +517,9 @@ function buildHud() {
   $("pips").innerHTML = "<i></i>".repeat(rules.energy_max);
   $("pips").style.gridTemplateColumns = `repeat(${rules.energy_max}, 9px)`;
   $("inv").innerHTML = SLOTS.map((t) => `<div class="slot empty" id="slot-${t}" title="${NAMES[t]}">${ICONS[t]}<b>0</b></div>`).join("");
-  for (const id of ["purse", "inv", "goal", "help", "ledger-btn", "tide"]) $(id).hidden = false;
+  for (const id of ["purse", "inv", "goal", "help", "ledger-btn", "tide", "mute"]) $(id).hidden = false;
+  $("mute").innerHTML = muted ? SPEAKER_OFF : SPEAKER_ON;
+  $("mute").onclick = () => setMuted(!muted);
   renderTide();
   setInterval(renderTide, 1000);
   $("tide").addEventListener("click", () => ($("tide-table").hidden = !$("tide-table").hidden));
@@ -582,6 +682,7 @@ function sayBubble(text) {
 
 function openShop() {
   S.shopOpen = true;
+  document.body.classList.add("shop-open"); // the bag and tide card move out from under the panel
   target = null;
   $("shop").hidden = false;
   $("stamp").hidden = true;
@@ -600,6 +701,7 @@ function openShop() {
 }
 function closeShop() {
   S.shopOpen = false;
+  document.body.classList.remove("shop-open");
   $("shop").hidden = true;
   session = null;
 }
@@ -974,6 +1076,21 @@ addEventListener("keydown", (e) => {
 addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 addEventListener("blur", () => keys.clear());
 
+// ---------- touch screens: a big "Use" button (there is no E key on a phone) ----------
+let touch = matchMedia("(pointer: coarse)").matches;
+addEventListener("pointerdown", (e) => e.pointerType === "touch" && (touch = true), { capture: true });
+let useShown = null;
+function updateUseButton() {
+  const h = touch && started && !busy && !S.shopOpen && !S.boardOpen && S.near ? HOTSPOTS.find((x) => x.id === S.near) : null;
+  if (h === useShown) return;
+  useShown = h;
+  $("use").hidden = !h;
+  if (h) $("use").innerHTML = `<b>${h.verb}</b>${h.cost ? `<small>${h.cost} energy</small>` : ""}`;
+}
+$("use").onclick = () => {
+  if (S.near && !busy) interact(S.near);
+};
+
 canvas.addEventListener("pointerdown", (e) => {
   if (!started || busy) return;
   if (S.shopOpen) closeShop();
@@ -1101,6 +1218,7 @@ function frame(now) {
   const p = S.player;
   S.tide.height = tideHeight(nowMs());
   S.storm.level = stormLevel(nowMs());
+  updateAmbient(t);
 
   if (started && !busy && !S.shopOpen && !S.boardOpen) {
     let dx = (keys.has("d") || keys.has("arrowright") ? 1 : 0) - (keys.has("a") || keys.has("arrowleft") ? 1 : 0);
@@ -1161,6 +1279,8 @@ function frame(now) {
       S.near = h.id;
     }
   }
+
+  updateUseButton();
 
   // rowing to the reef: out, wait for the catch, back
   if (sea) {
@@ -1248,6 +1368,7 @@ $("start").onclick = async () => {
     S.nightAmount = S.night ? 0.7 : 0;
     $("title").hidden = true;
     started = true;
+    startAmbient(); // (a click just happened, so the browser allows sound)
     updateTicker();
     if (pv.forages === 0) setTimeout(() => toast("Walk down to the tide pools on the shore and press E."), 900);
     setInterval(() => {

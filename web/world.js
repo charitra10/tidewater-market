@@ -54,6 +54,8 @@ export function walkable(x, y) {
   if (x < shoreX(y) + 16) return false;
   if (inPoly(CLIFF, x, y)) return false;
   for (const b of BLOCKS) if (x > b.x1 && x < b.x2 && y > b.y1 && y < b.y2) return false;
+  // tree trunks (the player steers round them)
+  for (const [tx, ty, s] of TREES) if (((x - tx) / (14 * s)) ** 2 + ((y - ty + 2) / (8 * s)) ** 2 < 1) return false;
   return true;
 }
 
@@ -303,14 +305,20 @@ function drawStorm(ctx, t, level) {
     ctx.lineTo(x - r.len * 0.28, y - r.len);
   }
   ctx.stroke();
-  if (level > 0.85) {
-    const k = (t % 7.3) / 7.3; // a double flash about every seven seconds
-    const flash = k < 0.012 ? 0.5 : k > 0.03 && k < 0.04 ? 0.28 : 0;
-    if (flash) {
-      ctx.fillStyle = `rgba(240,245,255,${flash})`;
-      ctx.fillRect(0, 0, W, H);
-    }
+  const flash = lightningAt(t, level);
+  if (flash) {
+    ctx.fillStyle = `rgba(240,245,255,${flash})`;
+    ctx.fillRect(0, 0, W, H);
   }
+}
+
+/// Lightning at time `t` (seconds): a double flash about every seven seconds
+/// at the height of a storm. Returns how bright, 0 when dark (the game plays
+/// thunder from the same clock).
+export function lightningAt(t, level) {
+  if (level <= 0.85) return 0;
+  const k = (t % 7.3) / 7.3;
+  return k < 0.012 ? 0.5 : k > 0.03 && k < 0.04 ? 0.28 : 0;
 }
 
 /// A bit of weed, a stone or a shell left on the wet sand by the falling tide.
