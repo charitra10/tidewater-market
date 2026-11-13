@@ -82,6 +82,44 @@ pub fn tide_at(ms: u64) -> (usize, bool) {
     (phase, spring)
 }
 
+/// Storms: exactly one in every half hour, `STORM_MS` long, starting at a time
+/// picked by a public hash of that half hour, so anyone can forecast them.
+/// (web/tide.js has the same formula.) In a storm the reef is too rough to row
+/// to, the shore is covered in wrack, the cliffs are slippery and the mainland
+/// boat stays in harbour.
+pub const STORM_BLOCK_MS: u64 = 30 * 60 * 1000;
+pub const STORM_MS: u64 = 4 * 60 * 1000;
+const STORM_SLOT_MS: u64 = 2 * 60 * 1000;
+const STORM_SLOTS: u32 = 13; // starts 0, 2, 4 ... 24 minutes into the half hour
+/// Chance (in percent) that a pickaxe breaks on the cliffs in a storm.
+pub const STORM_BREAK_PCT: u8 = 25;
+
+/// A 32-bit integer hash (`mix32` in web/tide.js).
+pub fn mix32(x: u32) -> u32 {
+    let mut h = x ^ 0x9e37_79b9;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
+fn storm_in(block: u64) -> (u64, u64) {
+    let start = block * STORM_BLOCK_MS + (mix32(block as u32) % STORM_SLOTS) as u64 * STORM_SLOT_MS;
+    (start, start + STORM_MS)
+}
+
+/// The storm blowing at `ms`, or else the next one: (blowing?, start ms, end ms).
+pub fn storm_at(ms: u64) -> (bool, u64, u64) {
+    let block = ms / STORM_BLOCK_MS;
+    let (mut start, mut end) = storm_in(block);
+    if ms >= end {
+        (start, end) = storm_in(block + 1);
+    }
+    (ms >= start && ms < end, start, end)
+}
+
 pub const MAX_TRADES: usize = 40;
 pub const MAX_BLOCKED: usize = 30;
 pub const MAX_KEEPERS: usize = 50;
@@ -298,6 +336,8 @@ pub struct ForageResult {
     /// The tide when you went: "low", "rising", "high" or "falling".
     pub tide: String,
     pub spring: bool,
+    /// Was a storm blowing?
+    pub storm: bool,
 }
 
 #[near(serializers = [json])]
@@ -306,6 +346,10 @@ pub struct TideView {
     pub spring: bool,
     /// When this part of the tide ends (block time, ms).
     pub phase_ends_ms: u64,
+    /// Is a storm blowing, and when does it (or the next one) start and end?
+    pub storm: bool,
+    pub storm_starts_ms: u64,
+    pub storm_ends_ms: u64,
     pub now_ms: u64,
 }
 
@@ -548,6 +592,12 @@ impl Market {
         if let Some(tool) = tool {
             require!(p.items[tool] > 0, format!("You need a {} to forage here", TOKENS[tool]));
         }
+        let now = env::block_timestamp_ms();
+        let (storm, _, _) = storm_at(now);
+        require!(
+            !(storm && spot == "reef"),
+            "The sea is too rough to row out to the reef. Wait for the storm to pass"
+        );
         self.refresh_energy(&mut p);
         require!(p.energy >= cost, "Not enough energy");
         if p.energy == self.energy_max {
@@ -565,9 +615,15 @@ impl Market {
 
         let mut found = [0u32; N];
         let mut tool_broke = false;
-        let (phase, spring) = tide_at(env::block_timestamp_ms());
+        let (phase, spring) = tide_at(now);
         let (a, b) = (r[0] as u32, r[1] as u32);
         match spot.as_str() {
+            // A storm covers the shore in wrack: driftwood, and now and then a pearl torn off the reef.
+            "shore" if storm => {
+                found[KELP] = 1 + a % 3; // 1-3
+                found[DRIFTWOOD] = 2 + b % 4; // 2-5
+                found[PEARL] = (r[3] % 8 == 0) as u32; // one time in eight
+            }
             // Low water uncovers the rock pools; high water throws driftwood up the beach.
             "shore" => {
                 (found[KELP], found[DRIFTWOOD]) = match (phase, spring) {
@@ -582,7 +638,7 @@ impl Market {
             "cliffs" => {
                 found[ORE] = 1 + a % 2; // 1-2
                 found[DRIFTWOOD] = b % 2; // 0-1
-                tool_broke = r[2] % 100 < PICKAXE_BREAK_PCT;
+                tool_broke = r[2] % 100 < if storm { STORM_BREAK_PCT } else { PICKAXE_BREAK_PCT };
             }
             // The reef: shallow at low water (pearls easy), deep at high water.
             _ => {
@@ -615,7 +671,7 @@ impl Market {
         let tide = TIDE_PHASES[phase].to_string();
         emit_game(
             "forage",
-            json!({ "player": id, "spot": spot, "found": found.to_vec(), "tool_broke": tool_broke, "tide": tide, "spring": spring }),
+            json!({ "player": id, "spot": spot, "found": found.to_vec(), "tool_broke": tool_broke, "tide": tide, "spring": spring, "storm": storm }),
         );
         ForageResult {
             spot,
@@ -624,6 +680,7 @@ impl Market {
             energy_left,
             tide,
             spring,
+            storm,
         }
     }
 
@@ -919,6 +976,7 @@ impl Market {
         let t = token_index(&token_id);
         let price = self.policy.export_price[t].as_yoctonear();
         require!(price > 0, "That item cannot be exported");
+        require!(!storm_at(env::block_timestamp_ms()).0, "The mainland boat stays in harbour during a storm");
         require!(qty > 0 && self.stock[t] >= qty, "Not enough stock");
         let pay = price * qty as u128;
         require!(pay <= self.mainland_fund, "The mainland is out of coin");
@@ -1184,6 +1242,11 @@ impl Market {
                 "phases": TIDE_PHASES,
                 "spring_every": SPRING_EVERY,
             },
+            "storm": {
+                "every_sec": STORM_BLOCK_MS / 1000,
+                "length_sec": STORM_MS / 1000,
+                "pickaxe_break_pct": STORM_BREAK_PCT,
+            },
         })
     }
 
@@ -1192,10 +1255,14 @@ impl Market {
         let now = env::block_timestamp_ms();
         let (phase, spring) = tide_at(now);
         let quarter = TIDE_PERIOD_MS / 4;
+        let (storm, storm_starts_ms, storm_ends_ms) = storm_at(now);
         TideView {
             phase: TIDE_PHASES[phase].to_string(),
             spring,
             phase_ends_ms: now - now % quarter + quarter,
+            storm,
+            storm_starts_ms,
+            storm_ends_ms,
             now_ms: now,
         }
     }
@@ -1543,17 +1610,123 @@ mod tests {
     }
 
     /// Forage `spot` 40 times, once per tide, always in the same part of it
-    /// (`phase` 0 low .. 3 falling) and on spring tides or ordinary ones.
-    /// The clock only moves forward, and energy refills between tides.
+    /// (`phase` 0 low .. 3 falling) and on spring tides or ordinary ones, and
+    /// never in a storm. The clock only moves forward, and energy refills between tides.
     fn forage_through_tides(m: &mut Market, spot: &str, phase: u64, spring: bool) -> Vec<ForageResult> {
         (0..40u8)
             .map(|i| {
                 let n = m.get_player(alice()).unwrap().forages as u64;
-                let tide = SPRING_EVERY * (n + 2) + if spring { 0 } else { 1 };
-                ctx_seed(alice(), ZERO, tide * TIDE_PERIOD_MS / 1000 + phase * 150 + 7, i);
+                let first = SPRING_EVERY * (4 * n + 2) + if spring { 0 } else { 1 };
+                let ts = (0..4)
+                    .map(|skip| (first + SPRING_EVERY * skip) * TIDE_PERIOD_MS / 1000 + phase * 150 + 7)
+                    .find(|ts| !storm_at(ts * 1000).0)
+                    .expect("a calm tide");
+                ctx_seed(alice(), ZERO, ts, i);
                 m.forage(spot.into())
             })
             .collect()
+    }
+
+    // ---------------- storms ----------------
+
+    /// A time `secs` seconds into the storm of half hour `block`.
+    fn in_storm(block: u64, secs: u64) -> u64 {
+        storm_in(block).0 / 1000 + secs
+    }
+
+    #[test]
+    fn storms_come_on_a_public_schedule() {
+        // the same tables are checked in server/tide.test.js
+        for (x, h) in [(0, 2_462_723_854), (1, 920_564_995), (996_968, 2_497_128_548), (u32::MAX, 996_586_154)] {
+            assert_eq!(mix32(x), h, "mix32({x})");
+        }
+        for (ms, blowing, start, end) in [
+            (0, false, 720_000, 960_000),
+            (1_000_000, false, 3_240_000, 3_480_000),
+            (1_794_543_000_000, true, 1_794_543_000_000, 1_794_543_240_000),
+            (1_794_543_239_999, true, 1_794_543_000_000, 1_794_543_240_000),
+        ] {
+            assert_eq!(storm_at(ms), (blowing, start, end), "at {ms} ms");
+        }
+        // exactly one storm in every half hour, 4 minutes long, over within it
+        for block in 0..2000u64 {
+            let (start, end) = storm_in(block);
+            let from = block * STORM_BLOCK_MS;
+            assert!(start >= from && end <= from + STORM_BLOCK_MS - STORM_SLOT_MS && end - start == STORM_MS);
+        }
+        let m = setup();
+        ctx(alice(), ZERO, in_storm(5, 60));
+        let t = m.get_tide();
+        assert!(t.storm && t.storm_starts_ms == storm_in(5).0 && t.storm_ends_ms == storm_in(5).1);
+    }
+
+    #[test]
+    #[should_panic(expected = "too rough to row out")]
+    fn nobody_rows_out_in_a_storm() {
+        let mut m = setup();
+        give(&mut m, alice(), BOAT, 1);
+        ctx(alice(), ZERO, in_storm(2, 30));
+        m.forage("reef".into());
+    }
+
+    #[test]
+    fn a_storm_covers_the_shore_in_wrack() {
+        let mut m = setup();
+        let mut pearls = 0;
+        for i in 0..48u64 {
+            ctx_seed(alice(), ZERO, in_storm(2 + i, 30), i as u8);
+            let r = m.forage("shore".into());
+            assert!(r.storm);
+            assert!((1..=3).contains(&r.found[KELP]) && (2..=5).contains(&r.found[DRIFTWOOD]) && r.found[PEARL] <= 1);
+            pearls += r.found[PEARL];
+        }
+        assert!(pearls > 0 && pearls < 20, "now and then a pearl washes up ({pearls} in 48)");
+        let p = m.get_player(alice()).unwrap();
+        assert_eq!(m.mt_supply("pearl".into()).unwrap().0, p.items[PEARL] as u128);
+    }
+
+    #[test]
+    fn pickaxes_break_more_often_on_wet_rock() {
+        let mut m = setup();
+        give(&mut m, alice(), PICKAXE, 200);
+        let mut broke = |storm: bool| {
+            (0..80u64)
+                .filter(|i| {
+                    // in the storm, or a minute after it blew over (calm until the next half hour)
+                    ctx_seed(alice(), ZERO, in_storm(100 + i + if storm { 0 } else { 100 }, if storm { 30 } else { 300 }), *i as u8);
+                    let r = m.forage("cliffs".into());
+                    assert_eq!(r.storm, storm);
+                    r.tool_broke
+                })
+                .count()
+        };
+        let stormy = broke(true); // (half hours 100.., then 200..: the clock only moves forward)
+        let calm = broke(false);
+        assert!(stormy > calm, "{stormy} breaks in storms vs {calm} in calm weather");
+    }
+
+    #[test]
+    #[should_panic(expected = "stays in harbour")]
+    fn the_mainland_boat_stays_in_harbour_in_a_storm() {
+        let mut m = setup();
+        ctx(owner(), YOCTO, 1000);
+        m.restock("kelp".into(), 20, coins(2));
+        ctx(owner(), coins(100), 1000);
+        m.fund_mainland();
+        ctx(merchant(), ZERO, in_storm(1, 10));
+        m.export("kelp".into(), 5);
+    }
+
+    #[test]
+    fn the_mainland_boat_sails_when_it_is_calm() {
+        let mut m = setup();
+        ctx(owner(), YOCTO, 1000);
+        m.restock("kelp".into(), 20, coins(2));
+        ctx(owner(), coins(100), 1000);
+        m.fund_mainland();
+        ctx(merchant(), ZERO, in_storm(1, 0) + 300); // a minute after it blew over
+        m.export("kelp".into(), 5);
+        assert_eq!(m.get_market().stock[KELP], 15);
     }
 
     #[test]
