@@ -201,6 +201,8 @@ function float(text, icon, opts = {}) {
 const mine = (account) => account === (me ?? save?.accountId); // (on the title screen, `me` is not set yet)
 function who(account) {
   if (mine(account)) return "You";
+  if (cfg && account === cfg.merchantId) return "Maren";
+  if (cfg && account === cfg.dealerId) return "Silas";
   const g = account.match(/^g([0-9a-f]{4})[0-9a-f]*\./);
   return g ? `Guest ${g[1]}` : account.split(".")[0];
 }
@@ -222,7 +224,7 @@ function eventText(e) {
   const merchant = e.merchant === "silas" ? "Silas" : "Maren";
   if (e.kind === "trade") return `${name} ${e.did} ${lot(e.token, e.qty)} ${e.did === "sold" ? "to" : "from"} ${merchant} for ${e.coins} coins`;
   if (e.kind === "board_sale") {
-    const buyer = e.maren ? "Maren" : name;
+    const buyer = name; // (Maren and Silas buy off the board too)
     if (mine(e.seller)) return `${buyer} bought your ${yourLot(e.token, e.qty)} off the notice board for ${e.coins} coins`;
     return `${buyer} bought ${lot(e.token, e.qty)} off ${noticeOf(e.seller)} for ${e.coins} coins`;
   }
@@ -910,7 +912,9 @@ function noticeRow(l) {
   const q = Math.max(1, Math.min(l.qty, buyQty[l.id] ?? l.qty));
   const total = l.unit * q;
   let compare;
-  if (RAW.includes(l.token)) compare = `Maren pays about ${fmt(marenBid(l.token))}`;
+  const merchant = cfg && (l.seller === cfg.merchantId || l.seller === cfg.dealerId);
+  if (merchant) compare = l.seller === cfg.merchantId ? "from her shelves: surplus for Silas, or for you" : "from his hold: pearls for Maren, or for you";
+  else if (RAW.includes(l.token)) compare = `Maren pays about ${fmt(marenBid(l.token))}`;
   else {
     const ask = marenAsk(l.token);
     compare = ask === null ? `<span class="good">Maren is sold out</span>` : l.unit < ask ? `<span class="good">Maren asks ${ask}</span>` : `Maren asks ${ask}`;
