@@ -47,14 +47,14 @@ run near account create-account sponsor-by-faucet-service "$OWNER" autogenerate-
   save-to-legacy-keychain $NET create
 
 step "Creating $MARKET (the contract) and $MERCHANT (Maren)"
-run near account create-account fund-myself "$MARKET" '3.4 NEAR' autogenerate-new-keypair \
+run near account create-account fund-myself "$MARKET" '3.7 NEAR' autogenerate-new-keypair \
   save-to-legacy-keychain sign-as "$OWNER" $SIGN
 run near account create-account fund-myself "$MERCHANT" '0.5 NEAR' autogenerate-new-keypair \
   save-to-legacy-keychain sign-as "$OWNER" $SIGN
 
 step "Creating $GUESTS (pays for new players' accounts)"
 KEYS=$(node scripts/keygen.mjs); GUESTS_SK=${KEYS%% *}; GUESTS_PK=${KEYS##* }
-run near account create-account fund-myself "$GUESTS" '2 NEAR' use-manually-provided-public-key "$GUESTS_PK" \
+run near account create-account fund-myself "$GUESTS" '1.5 NEAR' use-manually-provided-public-key "$GUESTS_PK" \
   sign-as "$OWNER" $SIGN
 
 step "Deploying the market contract"
@@ -66,9 +66,9 @@ call() { # call <method> <json-args> <deposit>
   run near contract call-function as-transaction "$MARKET" "$1" json-args "$2" \
     prepaid-gas '30 Tgas' attached-deposit "$3" sign-as "$OWNER" $SIGN
 }
-step "Filling Maren's treasury (1.5 NEAR) and the mainland's purse (1.5 NEAR)"
-call fund_treasury '{}' '1.5 NEAR'
-call fund_mainland '{}' '1.5 NEAR'
+step "Filling Maren's treasury (1.2 NEAR) and the mainland's purse (1.2 NEAR)"
+call fund_treasury '{}' '1.2 NEAR'
+call fund_mainland '{}' '1.2 NEAR'
 
 step "Stocking Maren's shelves"
 coin() { node -e 'console.log((BigInt(process.argv[1]) * 10n ** 21n).toString())' "$1"; }
@@ -95,12 +95,16 @@ SPONSOR_KEY=$GUESTS_SK
 ENV
 umask 022
 
+step "Bringing Silas, the pearl and ore dealer, to town"
+DEALER_TREASURY=0.6 MAINLAND_TOPUP=0 STORAGE_TOPUP=0 ./scripts/add-dealer.sh
+
 echo
 bold "✅ Tidewater Market is live on testnet"
 echo "   owner     $OWNER   (full-access key in ~/.near-credentials/testnet/)"
 echo "   contract  $MARKET"
 echo "   merchant  $MERCHANT   (her key in server/.env can only quote, craft, export and buy off the board)"
 echo "   guests    $GUESTS   (funds new players: 0.13 NEAR each)"
+echo "   dealer    dealer.$OWNER   (Silas; his key in server/.env can only quote, cancel and ship)"
 echo
 bold "Next:"
 echo "   1. Open the shop:     node server/server.js      then visit http://localhost:8787"

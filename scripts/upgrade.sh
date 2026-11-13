@@ -2,9 +2,9 @@
 # Upgrades an existing market (made by bootstrap.sh) to the contract in
 # contract/res/, keeping every player, item, trade and keeper.
 #
-#   1. Deploys the new contract. If the market predates the notice board, the
-#      same transaction runs `migrate`, so the code and the state change
-#      together or not at all.
+#   1. Deploys the new contract. If the market's saved state is an older layout
+#      (before the notice board, or before the dealer), the same transaction runs
+#      `migrate`, so the code and the state change together or not at all.
 #   2. If Maren's key in server/.env cannot buy off the notice board yet, gives
 #      her a new function-call key that can (and still nothing else) and
 #      switches server/.env to it. Keys are never printed.
@@ -30,8 +30,9 @@ METHODS="post_quote,cancel_quote,craft,export,shop_buy_listing"
 NET="network-config testnet"
 SIGN="$NET sign-with-legacy-keychain send"
 
-# Asks the chain (read-only) whether the market already has a notice board,
-# and whether Maren's current key may call shop_buy_listing. The key goes in
+# Asks the chain (read-only) whether the market's state is the current layout
+# (get_market reports dealer_id), and whether Maren's current key may call
+# shop_buy_listing. The key goes in
 # through the environment, never the command line.
 STATE=$(MERCHANT_KEY="$(get MERCHANT_KEY)" node --input-type=module -e '
   import { Near, loadKey } from "./web/near-lite.js";
@@ -44,10 +45,10 @@ STATE=$(MERCHANT_KEY="$(get MERCHANT_KEY)" node --input-type=module -e '
     const ak = await near.rpc("query", { request_type: "view_access_key", finality: "final", account_id: merchant, public_key: key.publicKey });
     can = (ak.permission.FunctionCall?.method_names ?? []).includes("shop_buy_listing");
   } catch {}
-  console.log(`${"board_version" in mv ? "board" : "v1"} ${can ? "key-ok" : "key-old"}`);
+  console.log(`${"dealer_id" in mv ? "current" : "old"} ${can ? "key-ok" : "key-old"}`);
 ' "$MARKET" "$MERCHANT" 2>>"$LOG")
 
-if [ "${STATE%% *}" = v1 ]; then
+if [ "${STATE%% *}" = old ]; then
   step "Deploying the new contract to $MARKET and migrating its state (one transaction)"
   run near contract deploy "$MARKET" use-file "$WASM" with-init-call migrate json-args '{}' \
     prepaid-gas '100 Tgas' attached-deposit '0 NEAR' $SIGN
@@ -71,3 +72,4 @@ if [ "${STATE##* }" = key-old ]; then
 fi
 
 printf "\n\033[1m✅ %s is up to date.\033[0m Restart the shop: node server/server.js\n" "$MARKET"
+grep -q '^DEALER_ID=' server/.env || echo "   To bring Silas, the pearl and ore dealer, to town: ./scripts/add-dealer.sh"
