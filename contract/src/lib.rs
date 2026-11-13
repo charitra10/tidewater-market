@@ -216,6 +216,20 @@ pub const COVER_PAYOUT: u128 = 45 * COIN;
 pub const MAX_COVERS_PER_STORM: u32 = 20;
 /// Reputation: how often Maren may note an insult from the same player.
 pub const INSULT_GAP_MS: u64 = 60 * 1000;
+/// Bids: Maren's wanted orders, offers on notices and bids at her auctions,
+/// all one kind of thing: a price offered for goods, the money held (or, for
+/// her orders, set aside in her treasury) until the deal closes.
+pub const MAX_BIDS: usize = 60;
+pub const MAX_ORDERS: usize = 3;
+pub const ORDER_MAX_MS: u64 = 60 * 60 * 1000;
+pub const MAX_OFFERS_PER_PLAYER: usize = 3;
+pub const OFFER_TTL_MS: u64 = 60 * 60 * 1000;
+/// An auction runs between these, each bid must beat the last by this much
+/// (percent), and a bid this close to the end pushes the end back by as much.
+pub const AUCTION_MIN_MS: u64 = 60 * 1000;
+pub const AUCTION_MAX_MS: u64 = 30 * 60 * 1000;
+pub const BID_STEP_PCT: u128 = 5;
+pub const AUCTION_EXTEND_MS: u64 = 30 * 1000;
 
 pub const MAX_TRADES: usize = 40;
 pub const MAX_BLOCKED: usize = 30;
@@ -589,6 +603,13 @@ pub struct MarketView {
     pub loans_out: u32,
     /// NEAR waiting for players to collect (IOU repayments, cover payouts).
     pub credit_total: NearToken,
+    /// Open orders and offers (see `get_bids`), and NEAR held for players' bids.
+    pub bid_count: u32,
+    pub bids_held: NearToken,
+    pub auction: Option<Auction>,
+    pub orders_filled: u32,
+    pub offers_taken: u32,
+    pub auctions_sold: u32,
 }
 
 #[near(serializers = [json])]
@@ -666,9 +687,133 @@ pub struct TideView {
     pub now_ms: u64,
 }
 
+/// What a bid is for.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BidKind {
+    /// Maren wants goods: any player may fill it from their bag, and she pays
+    /// from her treasury.
+    Order,
+    /// A player offers less than a notice asks; the seller may accept,
+    /// decline or counter.
+    Offer,
+    /// The highest bid at one of Maren's auctions.
+    Auction,
+}
+
+/// A price offered for goods. A player's bid is held by the contract until it
+/// is taken, turned down, withdrawn or lapses (then it goes back).
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bid {
+    pub id: u64,
+    pub kind: BidKind,
+    pub bidder: AccountId,
+    pub token_id: String,
+    pub qty: u32,
+    pub unit_price: NearToken,
+    /// NEAR the contract holds for it (0 for Maren's orders: she pays when filled).
+    pub held: NearToken,
+    /// An offer: the notice it is on. An auction bid: the auction.
+    pub on: Option<u64>,
+    /// An offer: the seller's counter-price per item, if they made one.
+    pub counter: Option<NearToken>,
+    /// An order: what she needs it for (say "boat").
+    pub reason: String,
+    pub placed_ms: u64,
+    pub expires_ms: u64,
+}
+
+/// One of Maren's auctions (one at a time). The item stays on her shelf,
+/// promised, until it is settled.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Auction {
+    pub id: u64,
+    pub token_id: String,
+    pub reserve: NearToken,
+    pub started_ms: u64,
+    pub ends_ms: u64,
+    pub bids: u32,
+    /// The highest bid so far; after settling, the winning bid (none: unsold).
+    pub top: Option<Bid>,
+    pub settled: bool,
+}
+
+#[near(serializers = [json])]
+pub struct BidResult {
+    /// "posted", "blocked", "sold", "countered" or "declined".
+    pub status: String,
+    pub reason: Option<String>,
+    pub bid: Option<Bid>,
+    pub sale: Option<BoardSale>,
+}
+
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Market {
+    owner_id: AccountId,
+    merchant_id: AccountId,
+    frozen: bool,
+    policy: Policy,
+    energy_max: u32,
+    energy_regen_ms: u64,
+    players: LookupMap<AccountId, Player>,
+    player_count: u32,
+    quotes: LookupMap<AccountId, Quote>,
+    stock: [u32; N],
+    /// Total cost of the stock on the shelves (average-cost accounting).
+    cost: [u128; N],
+    supply: [u64; N],
+    treasury: u128,
+    profit: i128,
+    total_sales: u128,
+    total_purchases: u128,
+    mainland_fund: u128,
+    total_exports: u128,
+    window_start_ms: u64,
+    bought_in_window: u128,
+    next_id: u64,
+    trade_count: u64,
+    blocked_count: u64,
+    trades: Vec<Trade>,
+    blocked: Vec<Blocked>,
+    keepers: Vec<Keeper>,
+    listings: Vec<Listing>,
+    board_sales: Vec<BoardSale>,
+    board_sale_count: u64,
+    board_version: u64,
+    dealer: Option<Dealer>,
+    dealer_quotes: LookupMap<AccountId, Quote>,
+    /// Maren's and Silas's shops (`MAREN`, `SILAS`): open or shut, and their IOUs.
+    shops: Vec<Shop>,
+    /// NEAR waiting for each investor (or insured player) to collect.
+    credit: LookupMap<AccountId, u128>,
+    credit_total: u128,
+    reputation: LookupMap<AccountId, Reputation>,
+    loans: LookupMap<AccountId, Loan>,
+    loan_list: Vec<AccountId>,
+    covers: LookupMap<AccountId, Cover>,
+    /// (storm start, covers sold for it)
+    cover_tally: (u64, u32),
+    premiums: u128,
+    payouts: u128,
+    covers_sold: u32,
+    claims_paid: u32,
+    /// Maren's wanted orders and players' offers on notices.
+    bids: Vec<Bid>,
+    /// Her auction: the one running, or the last one.
+    auction: Option<Auction>,
+    /// NEAR held for players' bids (offers and the top auction bid).
+    bids_held: u128,
+    orders_filled: u32,
+    offers_taken: u32,
+    auctions_sold: u32,
+}
+
+/// The state layout with investors, loans, cover and reputation, before bids (v4), read once by `migrate`.
+#[near(serializers = [borsh])]
+pub struct MarketV4 {
     owner_id: AccountId,
     merchant_id: AccountId,
     frozen: bool,
@@ -950,10 +1095,16 @@ impl Market {
             payouts: 0,
             covers_sold: 0,
             claims_paid: 0,
+            bids: Vec::new(),
+            auction: None,
+            bids_held: 0,
+            orders_filled: 0,
+            offers_taken: 0,
+            auctions_sold: 0,
         }
     }
 
-    /// Upgrade from an older state layout: v3 (before investors, loans, storm
+    /// Upgrade from an older state layout: v4 (before bids), v3 (before investors, loans, storm
     /// cover and reputation), v2 (before the dealer) or v1 (before the notice
     /// board). Keeps every player, item, trade, keeper, notice and the dealer.
     /// Only the contract account itself can call it, in the same transaction
@@ -962,14 +1113,17 @@ impl Market {
     #[init(ignore_state)]
     pub fn migrate() -> Self {
         let raw = env::storage_read(b"STATE").unwrap_or_else(|| env::panic_str("No state to migrate"));
+        if let Ok(old) = MarketV4::try_from_slice(&raw) {
+            return Self::from_v4(old);
+        }
         if let Ok(old) = MarketV3::try_from_slice(&raw) {
-            return Self::from_v3(old);
+            return Self::from_v4(Self::v3_to_v4(old));
         }
         if let Ok(old) = MarketV2::try_from_slice(&raw) {
-            return Self::from_v3(Self::v2_to_v3(old));
+            return Self::from_v4(Self::v3_to_v4(Self::v2_to_v3(old)));
         }
         let old = MarketV1::try_from_slice(&raw).unwrap_or_else(|_| env::panic_str("Cannot deserialize the old state: is it already upgraded?"));
-        Self::from_v3(Self::v2_to_v3(MarketV2 {
+        Self::from_v4(Self::v3_to_v4(Self::v2_to_v3(MarketV2 {
             owner_id: old.owner_id,
             merchant_id: old.merchant_id,
             frozen: old.frozen,
@@ -1000,7 +1154,7 @@ impl Market {
             board_sales: Vec::new(),
             board_sale_count: 0,
             board_version: 0,
-        }))
+        })))
     }
 
     fn v2_to_v3(old: MarketV2) -> MarketV3 {
@@ -1040,8 +1194,8 @@ impl Market {
         }
     }
 
-    fn from_v3(old: MarketV3) -> Self {
-        Self {
+    fn v3_to_v4(old: MarketV3) -> MarketV4 {
+        MarketV4 {
             owner_id: old.owner_id,
             merchant_id: old.merchant_id,
             frozen: old.frozen,
@@ -1086,6 +1240,61 @@ impl Market {
             payouts: 0,
             covers_sold: 0,
             claims_paid: 0,
+        }
+    }
+
+    fn from_v4(old: MarketV4) -> Self {
+        Self {
+            owner_id: old.owner_id,
+            merchant_id: old.merchant_id,
+            frozen: old.frozen,
+            policy: old.policy,
+            energy_max: old.energy_max,
+            energy_regen_ms: old.energy_regen_ms,
+            players: old.players,
+            player_count: old.player_count,
+            quotes: old.quotes,
+            stock: old.stock,
+            cost: old.cost,
+            supply: old.supply,
+            treasury: old.treasury,
+            profit: old.profit,
+            total_sales: old.total_sales,
+            total_purchases: old.total_purchases,
+            mainland_fund: old.mainland_fund,
+            total_exports: old.total_exports,
+            window_start_ms: old.window_start_ms,
+            bought_in_window: old.bought_in_window,
+            next_id: old.next_id,
+            trade_count: old.trade_count,
+            blocked_count: old.blocked_count,
+            trades: old.trades,
+            blocked: old.blocked,
+            keepers: old.keepers,
+            listings: old.listings,
+            board_sales: old.board_sales,
+            board_sale_count: old.board_sale_count,
+            board_version: old.board_version,
+            dealer: old.dealer,
+            dealer_quotes: old.dealer_quotes,
+            shops: old.shops,
+            credit: old.credit,
+            credit_total: old.credit_total,
+            reputation: old.reputation,
+            loans: old.loans,
+            loan_list: old.loan_list,
+            covers: old.covers,
+            cover_tally: old.cover_tally,
+            premiums: old.premiums,
+            payouts: old.payouts,
+            covers_sold: old.covers_sold,
+            claims_paid: old.claims_paid,
+            bids: Vec::new(),
+            auction: None,
+            bids_held: 0,
+            orders_filled: 0,
+            offers_taken: 0,
+            auctions_sold: 0,
         }
     }
 
@@ -1333,23 +1542,7 @@ impl Market {
                     "The merchant hit its spending cap"
                 );
                 p.items[t] -= q.qty;
-                self.stock[t] += q.qty;
-                self.cost[t] += total;
-                self.treasury -= total;
-                self.total_purchases += total;
-                self.bought_in_window += total;
-                // (half of it goes to their loan, if they owe Maren for a tool)
-                let kept = self.withhold_for_loan(&who, total);
-                if total > kept {
-                    Promise::new(who.clone()).transfer(NearToken::from_yoctonear(total - kept)).detach();
-                }
-                emit_mt(
-                    "mt_transfer",
-                    "old_owner_id",
-                    &who,
-                    Some(("new_owner_id", &self.merchant_id)),
-                    &[(t, q.qty)],
-                );
+                self.shop_pays(&who, t, q.qty, total);
             }
         }
         p.trades += 1;
@@ -1456,6 +1649,7 @@ impl Market {
         require!(self.listings[i].seller == who, "That is not your notice");
         let l = self.listings.remove(i);
         self.return_to_seller(&l); // (a merchant's goods never left the shelf)
+        self.drop_offers(id, 0);
         self.board_version += 1;
         emit_game("unlisted", json!({ "id": id, "seller": who }));
     }
@@ -1491,6 +1685,370 @@ impl Market {
         self.close_sale(i, &buyer, qty, total)
     }
 
+
+    // ------------------------------------------------------------------
+    // Bids: Maren's wanted orders, offers on notices, her auctions
+    // ------------------------------------------------------------------
+
+    /// Fill one of Maren's wanted orders (all of it, or `qty`) from your bag.
+    /// She pays the order's price from her treasury, under her guard rails.
+    pub fn fill_order(&mut self, id: u64, qty: u32) -> Trade {
+        let who = env::predecessor_account_id();
+        require!(self.party(&who) == Party::Player, "Merchants don't fill orders");
+        self.sweep_bids();
+        let i = self.bid_index(id);
+        let b = self.bids[i].clone();
+        require!(b.kind == BidKind::Order, "That is not one of Maren's orders");
+        require!(qty > 0 && qty <= b.qty, "She doesn't want that many");
+        let t = token_index(&b.token_id);
+        let total = b.unit_price.as_yoctonear() * qty as u128;
+        if let Some(reason) = self.check_quote(&Side::Buy, t, qty, total) {
+            env::panic_str(&format!("Maren can't take it just now ({reason})"));
+        }
+        let mut p = self.player(&who);
+        require!(p.items[t] >= qty, "You do not have that many");
+        p.items[t] -= qty;
+        p.trades += 1;
+        self.players.insert(who.clone(), p);
+        self.shop_pays(&who, t, qty, total);
+        self.bids[i].qty -= qty;
+        if self.bids[i].qty == 0 {
+            self.bids.remove(i);
+        }
+        self.orders_filled += 1;
+        self.board_version += 1;
+        self.trade_count += 1;
+        self.rep_mut(&who, |r| r.deals += 1);
+        self.settle_shops();
+        let trade = Trade {
+            id: b.id,
+            player: who,
+            side: Side::Buy,
+            token_id: b.token_id,
+            qty,
+            total: NearToken::from_yoctonear(total),
+            timestamp_ms: env::block_timestamp_ms(),
+        };
+        emit_game("order_filled", json!(trade));
+        push_capped(&mut self.trades, trade.clone(), MAX_TRADES);
+        trade
+    }
+
+    /// Offer less than a notice asks for `qty` of its goods, at `unit_price`
+    /// each. Attach the whole offer: the contract holds it until the seller
+    /// accepts, declines or counters, you withdraw it, or it lapses (an hour,
+    /// or when the notice comes down), and then it comes back to you.
+    #[payable]
+    pub fn make_offer(&mut self, listing_id: u64, qty: u32, unit_price: NearToken) -> Bid {
+        let who = env::predecessor_account_id();
+        require!(self.party(&who) == Party::Player, "Merchants don't make offers");
+        self.player(&who); // (players only)
+        self.sweep_board();
+        self.sweep_bids();
+        let l = self.listings[self.listing_index(listing_id)].clone();
+        require!(l.seller != who, "That is your own notice");
+        require!(qty > 0 && qty <= l.qty, "There are not that many on the notice");
+        let unit = unit_price.as_yoctonear();
+        require!(unit > 0 && unit < l.unit_price.as_yoctonear(), "Offer less than the notice asks, or just buy it");
+        match self.party(&l.seller) {
+            Party::Shop => require!(!self.shops[MAREN].closed, "Maren's stall is shut until someone invests in it"),
+            Party::Dealer => require!(!self.shops[SILAS].closed, "Silas has gone to the city to raise money"),
+            Party::Player => {}
+        }
+        let total = unit * qty as u128;
+        let paid = env::attached_deposit().as_yoctonear();
+        require!(paid >= total, "Attach your offer: the contract holds it until the seller answers");
+        require!(
+            !self.bids.iter().any(|b| b.kind == BidKind::Offer && b.bidder == who && b.on == Some(listing_id)),
+            "You already have an offer on that notice"
+        );
+        require!(
+            self.bids.iter().filter(|b| b.kind == BidKind::Offer && b.bidder == who).count() < MAX_OFFERS_PER_PLAYER,
+            "You have three offers out already. Withdraw one first."
+        );
+        require!(self.bids.len() < MAX_BIDS, "Too many bids are open on the board");
+        if paid > total {
+            Promise::new(who.clone()).transfer(NearToken::from_yoctonear(paid - total)).detach();
+        }
+        let now = env::block_timestamp_ms();
+        let bid = Bid {
+            id: self.next_id,
+            kind: BidKind::Offer,
+            bidder: who,
+            token_id: l.token_id,
+            qty,
+            unit_price,
+            held: NearToken::from_yoctonear(total),
+            on: Some(listing_id),
+            counter: None,
+            reason: String::new(),
+            placed_ms: now,
+            expires_ms: l.expires_ms.min(now + OFFER_TTL_MS),
+        };
+        self.next_id += 1;
+        self.bids_held += total;
+        self.bids.push(bid.clone());
+        self.board_version += 1;
+        emit_game("offer", json!(bid));
+        bid
+    }
+
+    /// Answer an offer on your notice: "accept" (the goods go to the bidder,
+    /// the held coins to you), "decline" (they go back) or "counter" with a
+    /// price per item between their offer and your asking price. Maren and
+    /// Silas answer offers on their notices with their own keys, under their
+    /// guard rails (a refusal is recorded instead of failing).
+    pub fn answer_offer(&mut self, id: u64, answer: String, counter: Option<NearToken>) -> BidResult {
+        let who = env::predecessor_account_id();
+        self.sweep_board();
+        self.sweep_bids();
+        let i = self.bid_index(id);
+        let b = self.bids[i].clone();
+        require!(b.kind == BidKind::Offer, "That is not an offer");
+        let li = self.listing_index(b.on.unwrap());
+        let l = self.listings[li].clone();
+        require!(l.seller == who, "That offer is not on your notice");
+        match answer.as_str() {
+            "accept" => {
+                if let Some(reason) = self.seller_refuses(&l, &b, b.unit_price.as_yoctonear()) {
+                    return self.offer_blocked(&l, &b, b.unit_price.as_yoctonear(), reason);
+                }
+                require!(b.qty <= l.qty, "Not that many are left on the notice");
+                let sale = self.take_offer(i, li, b.unit_price.as_yoctonear());
+                BidResult { status: "sold".into(), reason: None, bid: None, sale: Some(sale) }
+            }
+            "counter" => {
+                let c = counter.unwrap_or_else(|| env::panic_str("Name your counter-price")).as_yoctonear();
+                require!(
+                    c > b.unit_price.as_yoctonear() && c < l.unit_price.as_yoctonear(),
+                    "A counter-offer goes between their offer and your price"
+                );
+                if let Some(reason) = self.seller_refuses(&l, &b, c) {
+                    return self.offer_blocked(&l, &b, c, reason);
+                }
+                self.bids[i].counter = Some(NearToken::from_yoctonear(c));
+                self.board_version += 1;
+                let bid = self.bids[i].clone();
+                emit_game("offer_countered", json!(bid));
+                BidResult { status: "countered".into(), reason: None, bid: Some(bid), sale: None }
+            }
+            "decline" => {
+                let b = self.bids.remove(i);
+                self.refund(&b);
+                self.board_version += 1;
+                emit_game("offer_declined", json!({ "id": id, "bidder": b.bidder }));
+                BidResult { status: "declined".into(), reason: None, bid: None, sale: None }
+            }
+            _ => env::panic_str("Answer accept, decline or counter"),
+        }
+    }
+
+    /// Take the seller's counter-offer: attach the difference between it and
+    /// your offer (any extra comes back).
+    #[payable]
+    pub fn accept_counter(&mut self, id: u64) -> BoardSale {
+        let who = env::predecessor_account_id();
+        self.sweep_board();
+        self.sweep_bids();
+        let i = self.bid_index(id);
+        let b = self.bids[i].clone();
+        require!(b.kind == BidKind::Offer && b.bidder == who, "That is not your offer");
+        let c = b.counter.unwrap_or_else(|| env::panic_str("The seller hasn't countered")).as_yoctonear();
+        let li = self.listing_index(b.on.unwrap());
+        let l = self.listings[li].clone();
+        require!(b.qty <= l.qty, "Not that many are left on the notice");
+        if let Some(reason) = self.seller_refuses(&l, &b, c) {
+            env::panic_str(&format!("The seller can't sell at that price any more ({reason})"));
+        }
+        let extra = (c - b.unit_price.as_yoctonear()) * b.qty as u128;
+        let paid = env::attached_deposit().as_yoctonear();
+        require!(paid >= extra, "Attach the difference");
+        if paid > extra {
+            Promise::new(who.clone()).transfer(NearToken::from_yoctonear(paid - extra)).detach();
+        }
+        self.bids[i].held = NearToken::from_yoctonear(b.held.as_yoctonear() + extra);
+        self.bids_held += extra;
+        self.take_offer(i, li, c)
+    }
+
+    /// Take back an offer of yours that nobody has accepted yet.
+    pub fn withdraw_offer(&mut self, id: u64) {
+        let who = env::predecessor_account_id();
+        let i = self.bid_index(id);
+        require!(self.bids[i].kind == BidKind::Offer && self.bids[i].bidder == who, "That is not your offer");
+        let b = self.bids.remove(i);
+        self.refund(&b);
+        self.board_version += 1;
+        emit_game("offer_withdrawn", json!({ "id": id, "bidder": who }));
+    }
+
+    /// Bid at Maren's auction: attach your bid. It must meet her reserve and
+    /// beat the highest bid by 5%; the bid it beats goes straight back to its
+    /// bidder. A bid in the last 30 seconds keeps it open 30 seconds more.
+    #[payable]
+    pub fn bid_auction(&mut self, id: u64) -> Auction {
+        let who = env::predecessor_account_id();
+        require!(self.party(&who) == Party::Player, "Merchants don't bid");
+        self.player(&who); // (players only)
+        let now = env::block_timestamp_ms();
+        let mut a = self.auction.clone().filter(|a| a.id == id && !a.settled).unwrap_or_else(|| env::panic_str("There is no such auction"));
+        require!(now < a.ends_ms, "The auction is over");
+        let paid = env::attached_deposit().as_yoctonear();
+        let least = match &a.top {
+            None => a.reserve.as_yoctonear(),
+            Some(top) => top.held.as_yoctonear() * (100 + BID_STEP_PCT) / 100,
+        };
+        require!(paid >= least, format!("Bid at least {} coins", least.div_ceil(COIN)));
+        if let Some(beaten) = a.top.take() {
+            self.refund(&beaten);
+        }
+        let bid = Bid {
+            id: self.next_id,
+            kind: BidKind::Auction,
+            bidder: who,
+            token_id: a.token_id.clone(),
+            qty: 1,
+            unit_price: NearToken::from_yoctonear(paid),
+            held: NearToken::from_yoctonear(paid),
+            on: Some(id),
+            counter: None,
+            reason: String::new(),
+            placed_ms: now,
+            expires_ms: a.ends_ms,
+        };
+        self.next_id += 1;
+        self.bids_held += paid;
+        a.bids += 1;
+        if a.ends_ms - now < AUCTION_EXTEND_MS {
+            a.ends_ms = now + AUCTION_EXTEND_MS;
+        }
+        a.top = Some(bid.clone());
+        self.auction = Some(a.clone());
+        self.board_version += 1;
+        emit_game("auction_bid", json!(bid));
+        a
+    }
+
+    /// Close an auction whose time is up (anyone may): the highest bidder
+    /// gets the goods and Maren the coins. With no bids, it stays on her shelf.
+    pub fn settle_auction(&mut self) -> Auction {
+        let now = env::block_timestamp_ms();
+        let mut a = self.auction.clone().filter(|a| !a.settled).unwrap_or_else(|| env::panic_str("No auction is running"));
+        require!(now >= a.ends_ms, "The auction is still running");
+        a.settled = true;
+        if let Some(top) = a.top.clone() {
+            let t = token_index(&a.token_id);
+            let price = top.held.as_yoctonear();
+            self.bids_held -= price;
+            let cost_out = self.take_stock(t, 1);
+            self.treasury += price;
+            self.total_sales += price;
+            self.profit += price as i128 - cost_out as i128;
+            self.earned(MAREN, price as i128 - cost_out as i128);
+            let mut p = self.player(&top.bidder);
+            p.items[t] += 1;
+            p.trades += 1;
+            self.players.insert(top.bidder.clone(), p);
+            self.trade_count += 1;
+            self.auctions_sold += 1;
+            self.rep_mut(&top.bidder, |r| r.deals += 1);
+            let merchant = self.merchant_id.clone();
+            emit_mt("mt_transfer", "old_owner_id", &merchant, Some(("new_owner_id", &top.bidder)), &[(t, 1)]);
+            let trade = Trade {
+                id: a.id,
+                player: top.bidder,
+                side: Side::Sell,
+                token_id: a.token_id.clone(),
+                qty: 1,
+                total: top.held,
+                timestamp_ms: now,
+            };
+            push_capped(&mut self.trades, trade, MAX_TRADES);
+        }
+        self.auction = Some(a.clone());
+        self.board_version += 1;
+        self.settle_shops();
+        emit_game("auction_settled", json!(a));
+        a
+    }
+
+    /// Maren wants goods: post a standing order for `qty` at `unit_price`
+    /// each, until `expires_ms` (at most an hour away), saying what for. Her
+    /// guard rails apply (ceiling, spending cap), and her open orders together
+    /// may not promise more than her treasury holds. A refusal is recorded.
+    pub fn post_order(&mut self, token_id: String, qty: u32, unit_price: NearToken, reason: String, expires_ms: u64) -> BidResult {
+        self.assert_merchant();
+        self.sweep_bids();
+        let t = token_index(&token_id);
+        require!(t < ROPE, "She orders raw goods only");
+        require!(qty > 0 && qty <= MAX_QTY, "Bad quantity");
+        require!(reason.len() <= MAX_MEMO_LEN, "Say it shorter");
+        let now = env::block_timestamp_ms();
+        require!(expires_ms > now && expires_ms <= now + ORDER_MAX_MS, "An order lasts up to an hour");
+        let total = unit_price.as_yoctonear() * qty as u128;
+        require!(total > 0, "Set a price");
+        let promised: u128 = self.bids.iter().filter(|b| b.kind == BidKind::Order).map(|b| b.unit_price.as_yoctonear() * b.qty as u128).sum();
+        let refused = self.check_quote(&Side::Buy, t, qty, total).or(if promised + total > self.treasury { Some("treasury_too_low") } else { None });
+        if let Some(why) = refused {
+            let board = env::current_account_id();
+            self.record_blocked(board, Side::Buy, token_id, qty, NearToken::from_yoctonear(total), why);
+            return BidResult { status: "blocked".into(), reason: Some(why.to_string()), bid: None, sale: None };
+        }
+        require!(!self.bids.iter().any(|b| b.kind == BidKind::Order && b.token_id == token_id), "She already has an order out for that");
+        require!(self.bids.iter().filter(|b| b.kind == BidKind::Order).count() < MAX_ORDERS, "Three orders out already");
+        require!(self.bids.len() < MAX_BIDS, "Too many bids are open on the board");
+        let bid = Bid {
+            id: self.next_id,
+            kind: BidKind::Order,
+            bidder: self.merchant_id.clone(),
+            token_id,
+            qty,
+            unit_price,
+            held: NearToken::from_yoctonear(0),
+            on: None,
+            counter: None,
+            reason,
+            placed_ms: now,
+            expires_ms,
+        };
+        self.next_id += 1;
+        self.bids.push(bid.clone());
+        self.board_version += 1;
+        emit_game("order", json!(bid));
+        BidResult { status: "posted".into(), reason: None, bid: Some(bid), sale: None }
+    }
+
+    /// Take down one of her orders.
+    pub fn cancel_order(&mut self, id: u64) {
+        self.assert_merchant();
+        let i = self.bid_index(id);
+        require!(self.bids[i].kind == BidKind::Order, "That is not one of her orders");
+        self.bids.remove(i);
+        self.board_version += 1;
+        emit_game("order_cancelled", json!({ "id": id }));
+    }
+
+    /// Auction one of her wares (one at a time) until `ends_ms`, between one
+    /// and thirty minutes away, with a reserve no lower than her price floor.
+    /// The item stays on her shelf, promised, until the auction is settled.
+    pub fn start_auction(&mut self, token_id: String, reserve: NearToken, ends_ms: u64) -> Auction {
+        self.assert_merchant();
+        let t = token_index(&token_id);
+        require!(t >= PICKAXE, "She auctions tools and lenses only");
+        require!(!self.frozen && !self.shops[MAREN].closed, "Her stall is shut");
+        require!(self.auction.as_ref().map_or(true, |a| a.settled), "One auction at a time");
+        let now = env::block_timestamp_ms();
+        require!(ends_ms >= now + AUCTION_MIN_MS && ends_ms <= now + AUCTION_MAX_MS, "An auction runs one to thirty minutes");
+        require!(reserve.as_yoctonear() >= self.policy.floor[t].as_yoctonear(), "The reserve may not be below her price floor");
+        let merchant = self.merchant_id.clone();
+        require!(self.stock[t] >= 1 + self.reserved(&merchant, t), "She has none spare to auction");
+        let a = Auction { id: self.next_id, token_id, reserve, started_ms: now, ends_ms, bids: 0, top: None, settled: false };
+        self.next_id += 1;
+        self.auction = Some(a.clone());
+        self.board_version += 1;
+        emit_game("auction_started", json!(a));
+        a
+    }
 
     // ------------------------------------------------------------------
     // Investing in a merchant, loans of tools, storm cover (anyone who has joined)
@@ -2255,6 +2813,12 @@ impl Market {
             },
             loans_out: self.loan_list.len() as u32,
             credit_total: NearToken::from_yoctonear(self.credit_total),
+            bid_count: self.bids.len() as u32,
+            bids_held: NearToken::from_yoctonear(self.bids_held),
+            auction: self.auction.clone(),
+            orders_filled: self.orders_filled,
+            offers_taken: self.offers_taken,
+            auctions_sold: self.auctions_sold,
         }
     }
 
@@ -2301,6 +2865,16 @@ impl Market {
     }
 
     /// Every tool Maren has out on loan.
+    /// Open orders and offers on the board.
+    pub fn get_bids(&self) -> Vec<Bid> {
+        self.bids.clone()
+    }
+
+    /// Maren's auction: the one running, or the last one.
+    pub fn get_auction(&self) -> Option<Auction> {
+        self.auction.clone()
+    }
+
     pub fn get_loans(&self) -> Vec<Loan> {
         self.loan_list.iter().filter_map(|a| self.loans.get(a).cloned()).collect()
     }
@@ -2353,6 +2927,13 @@ impl Market {
                 "every_sec": STORM_BLOCK_MS / 1000,
                 "length_sec": STORM_MS / 1000,
                 "pickaxe_break_pct": STORM_BREAK_PCT,
+            },
+            "bids": {
+                "max_offers_per_player": MAX_OFFERS_PER_PLAYER,
+                "offer_ttl_sec": OFFER_TTL_MS / 1000,
+                "max_orders": MAX_ORDERS,
+                "bid_step_pct": BID_STEP_PCT,
+                "auction_extend_sec": AUCTION_EXTEND_MS / 1000,
             },
         })
     }
@@ -2652,6 +3233,121 @@ impl Market {
         }
     }
 
+    /// Maren buys goods a player has handed over: onto her shelf at what she
+    /// paid, out of her treasury (half of it to their loan, if they owe her).
+    fn shop_pays(&mut self, who: &AccountId, t: usize, qty: u32, total: u128) {
+        self.roll_window();
+        self.stock[t] += qty;
+        self.cost[t] += total;
+        self.treasury -= total;
+        self.total_purchases += total;
+        self.bought_in_window += total;
+        let kept = self.withhold_for_loan(who, total);
+        if total > kept {
+            Promise::new(who.clone()).transfer(NearToken::from_yoctonear(total - kept)).detach();
+        }
+        let merchant = self.merchant_id.clone();
+        emit_mt("mt_transfer", "old_owner_id", who, Some(("new_owner_id", &merchant)), &[(t, qty)]);
+    }
+
+    fn bid_index(&self, id: u64) -> usize {
+        self.bids.iter().position(|b| b.id == id).unwrap_or_else(|| env::panic_str("That bid is no longer open"))
+    }
+
+    /// Give a bid's held NEAR back to its bidder.
+    fn refund(&mut self, b: &Bid) {
+        let held = b.held.as_yoctonear();
+        if held > 0 {
+            self.bids_held -= held;
+            Promise::new(b.bidder.clone()).transfer(b.held).detach();
+        }
+    }
+
+    /// Offers that lapse go back to their bidders; orders that lapse come down.
+    fn sweep_bids(&mut self) {
+        let now = env::block_timestamp_ms();
+        let (gone, open): (Vec<Bid>, Vec<Bid>) = std::mem::take(&mut self.bids).into_iter().partition(|b| now > b.expires_ms);
+        self.bids = open;
+        for b in gone.iter() {
+            self.refund(b);
+            emit_game("bid_lapsed", json!({ "id": b.id, "bidder": b.bidder }));
+        }
+        if !gone.is_empty() {
+            self.board_version += 1;
+        }
+    }
+
+    /// Offers on a notice that now has fewer than `left` goods (or none) go back.
+    fn drop_offers(&mut self, listing_id: u64, left: u32) {
+        let (gone, open): (Vec<Bid>, Vec<Bid>) =
+            std::mem::take(&mut self.bids).into_iter().partition(|b| b.kind == BidKind::Offer && b.on == Some(listing_id) && b.qty > left);
+        self.bids = open;
+        for b in gone.iter() {
+            self.refund(b);
+        }
+    }
+
+    /// Why the seller of a notice may not sell at `unit` each, if they may not
+    /// (Maren: her price floor; Silas: what the goods cost him; either: shut).
+    fn seller_refuses(&self, l: &Listing, b: &Bid, unit: u128) -> Option<&'static str> {
+        let t = token_index(&l.token_id);
+        match self.party(&l.seller) {
+            Party::Player => None,
+            Party::Shop if self.frozen => Some("frozen"),
+            Party::Shop if self.shops[MAREN].closed => Some("shop_closed"),
+            Party::Shop if unit < self.policy.floor[t].as_yoctonear() => Some("below_price_floor"),
+            Party::Shop if self.stock[t] < b.qty => Some("out_of_stock"),
+            Party::Shop => None,
+            Party::Dealer => {
+                let d = self.dealer.as_ref().unwrap();
+                let avg = if d.stock[t] == 0 { 0 } else { d.cost[t] / d.stock[t] as u128 };
+                if self.frozen {
+                    Some("frozen")
+                } else if self.shops[SILAS].closed {
+                    Some("shop_closed")
+                } else if unit < avg {
+                    Some("below_cost")
+                } else if d.stock[t] < b.qty {
+                    Some("out_of_stock")
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// A merchant may not take (or counter at) that price: record it and say so.
+    fn offer_blocked(&mut self, l: &Listing, b: &Bid, unit: u128, reason: &str) -> BidResult {
+        let total = unit * b.qty as u128;
+        if self.party(&l.seller) == Party::Dealer {
+            self.dealer_blocked(b.bidder.clone(), Side::Sell, l.token_id.clone(), b.qty, total, reason);
+        } else {
+            self.record_blocked(b.bidder.clone(), Side::Sell, l.token_id.clone(), b.qty, NearToken::from_yoctonear(total), reason);
+        }
+        BidResult { status: "blocked".into(), reason: Some(reason.to_string()), bid: None, sale: None }
+    }
+
+    /// Close an offer at `unit` each: the bidder gets the goods off the notice,
+    /// and the held NEAR pays the seller (anything held beyond that goes back).
+    fn take_offer(&mut self, i: usize, li: usize, unit: u128) -> BoardSale {
+        let b = self.bids.remove(i);
+        let total = unit * b.qty as u128;
+        let held = b.held.as_yoctonear();
+        require!(held >= total, "The held offer does not cover the price");
+        self.bids_held -= held;
+        if held > total {
+            Promise::new(b.bidder.clone()).transfer(NearToken::from_yoctonear(held - total)).detach();
+        }
+        let mut p = self.player(&b.bidder);
+        p.items[token_index(&b.token_id)] += b.qty;
+        p.trades += 1;
+        self.players.insert(b.bidder.clone(), p);
+        self.offers_taken += 1;
+        let sale = self.close_sale(li, &b.bidder, b.qty, total);
+        emit_game("offer_taken", json!({ "id": b.id, "bidder": b.bidder, "unit_price": NearToken::from_yoctonear(unit) }));
+        sale
+    }
+
     fn assert_merchant(&self) {
         require!(env::predecessor_account_id() == self.merchant_id, "Merchant only");
     }
@@ -2747,7 +3443,12 @@ impl Market {
 
     /// How many of a token a merchant has promised on the board.
     fn reserved(&self, seller: &AccountId, t: usize) -> u32 {
-        self.listings.iter().filter(|l| l.seller == *seller && token_index(&l.token_id) == t).map(|l| l.qty).sum()
+        let on_board: u32 = self.listings.iter().filter(|l| l.seller == *seller && token_index(&l.token_id) == t).map(|l| l.qty).sum();
+        let at_auction = self
+            .auction
+            .as_ref()
+            .is_some_and(|a| !a.settled && *seller == self.merchant_id && token_index(&a.token_id) == t);
+        on_board + at_auction as u32
     }
 
     /// Put a merchant's notice on the board (no escrow: the goods stay on the shelf).
@@ -2802,6 +3503,7 @@ impl Market {
         self.listings = live;
         for l in expired.iter() {
             self.return_to_seller(l);
+            self.drop_offers(l.id, 0);
             emit_game("listing_expired", json!({ "id": l.id, "seller": l.seller }));
         }
         if !expired.is_empty() {
@@ -2823,9 +3525,11 @@ impl Market {
             total: NearToken::from_yoctonear(total),
             timestamp_ms: env::block_timestamp_ms(),
         };
-        if l.qty == 0 {
+        let left = l.qty;
+        if left == 0 {
             self.listings.remove(i);
         }
+        self.drop_offers(sale.listing_id, left);
         let t = token_index(&sale.token_id);
         let mut margin: Option<(usize, i128)> = None;
         let from = match self.party(&sale.seller) {
@@ -4426,6 +5130,29 @@ mod tests {
         assert!(MarketV3::try_from_slice(&env::storage_read(b"STATE").unwrap()).is_err());
     }
 
+    const LIVE_V4_STATE: &[u8] = include_bytes!("../tests/fixtures/v4_state.bin");
+
+    #[test]
+    fn migrate_keeps_the_live_v4_state() {
+        ctx(contract(), ZERO, 1_794_610_000);
+        env::storage_write(b"STATE", LIVE_V4_STATE);
+        let raw = MarketV4::try_from_slice(LIVE_V4_STATE).unwrap();
+        let (players, trades, treasury, credit) = (raw.player_count, raw.trade_count, raw.treasury, raw.credit_total);
+        let ious = raw.shops[MAREN].ious.len();
+        let m = Market::migrate();
+        let mv = m.get_market();
+        assert_eq!((mv.player_count, mv.trade_count, mv.treasury.as_yoctonear(), mv.credit_total.as_yoctonear()), (players, trades, treasury, credit));
+        assert!(players >= 35 && ious >= 1, "the live market at the time: {players} players, {ious} IOUs");
+        assert_eq!(m.get_ious("maren".into()).len(), ious);
+        assert!(m.get_dealer().is_some());
+        // no bids and no auction yet
+        assert!(m.get_bids().is_empty() && m.get_auction().is_none() && mv.bids_held.is_zero());
+        env::state_write(&m);
+        let again: Market = env::state_read().unwrap();
+        assert_eq!(again.get_market().trade_count, trades);
+        assert!(MarketV4::try_from_slice(&env::storage_read(b"STATE").unwrap()).is_err());
+    }
+
     /// Run Maren's treasury down by buying ore from alice (one quote per call).
     fn sell_maren_ore(m: &mut Market, qty: u32, total: u128, ts: u64) -> QuoteResult {
         give(m, alice(), ORE, qty);
@@ -4781,5 +5508,401 @@ mod tests {
         let mut m = setup();
         ctx(alice(), ZERO, 1001);
         m.note_insult(alice());
+    }
+
+    // ---------- bids: orders, offers on notices, auctions ----------
+
+    fn order(m: &mut Market, token: &str, qty: u32, unit: u128, ts: u64) -> BidResult {
+        ctx(merchant(), ZERO, ts);
+        m.post_order(token.into(), qty, coins(unit), "boat".into(), ts * 1000 + 600_000)
+    }
+
+    fn offer(m: &mut Market, who: AccountId, listing: u64, qty: u32, unit: u128, ts: u64) -> Bid {
+        ctx(who, coins(unit * qty as u128), ts);
+        m.make_offer(listing, qty, coins(unit))
+    }
+
+    #[test]
+    fn maren_posts_an_order_and_players_fill_it() {
+        let mut m = setup();
+        let r = order(&mut m, "ore", 2, 40, 1000);
+        assert_eq!(r.status, "posted");
+        let o = r.bid.unwrap();
+        assert_eq!((o.kind.clone(), o.reason.as_str(), o.held), (BidKind::Order, "boat", ZERO));
+        give(&mut m, alice(), ORE, 3);
+        ctx(alice(), ZERO, 1010);
+        let t = m.fill_order(o.id, 1);
+        assert_eq!((t.side, t.qty, t.total), (Side::Buy, 1, coins(40)));
+        assert!(transfers().contains(&(alice(), coins(40))));
+        assert_eq!(m.get_bids()[0].qty, 1, "she still wants one more");
+        ctx(alice(), ZERO, 1020);
+        m.fill_order(o.id, 1);
+        let mv = m.get_market();
+        assert!(m.get_bids().is_empty());
+        assert_eq!((mv.stock[ORE], mv.treasury, mv.orders_filled, mv.trade_count), (2, coins(920), 2, 2));
+        assert_eq!(m.get_trades(Some(1))[0].token_id, "ore");
+        assert_eq!(m.get_reputation(alice()).deals, 2);
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    #[test]
+    fn her_orders_obey_her_guard_rails() {
+        let mut m = setup();
+        // above her price ceiling (60 for ore): refused and recorded
+        let r = order(&mut m, "ore", 1, 61, 1000);
+        assert_eq!((r.status.as_str(), r.reason.as_deref()), ("blocked", Some("above_price_ceiling")));
+        assert_eq!(m.get_blocked(Some(1))[0].reason, "above_price_ceiling");
+        // her orders together may not promise more than her treasury (1000) holds
+        let mut p = policy();
+        p.buy_window_limit = coins(5000);
+        ctx(owner(), YOCTO, 1000);
+        m.set_policy(p);
+        assert_eq!(order(&mut m, "pearl", 5, 150, 1000).status, "posted");
+        assert_eq!(order(&mut m, "ore", 5, 60, 1000).reason.as_deref(), Some("treasury_too_low"));
+        assert_eq!(order(&mut m, "ore", 4, 60, 1000).status, "posted");
+        assert_eq!(m.get_bids().len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Three orders out already")]
+    fn three_orders_at_most() {
+        let mut m = setup();
+        for t in ["kelp", "driftwood", "ore", "pearl"] {
+            order(&mut m, t, 1, 5, 1000);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "She orders raw goods only")]
+    fn she_orders_raw_goods_only() {
+        let mut m = setup();
+        order(&mut m, "pickaxe", 1, 40, 1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Merchant only")]
+    fn only_maren_posts_orders() {
+        let mut m = setup();
+        ctx(alice(), ZERO, 1000);
+        m.post_order("ore".into(), 1, coins(30), "boat".into(), 1_100_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "That bid is no longer open")]
+    fn an_order_lapses() {
+        let mut m = setup();
+        let o = order(&mut m, "ore", 1, 40, 1000).bid.unwrap();
+        give(&mut m, alice(), ORE, 1);
+        ctx(alice(), ZERO, 1000 + 601);
+        m.fill_order(o.id, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "You do not have that many")]
+    fn filling_an_order_needs_the_goods() {
+        let mut m = setup();
+        let o = order(&mut m, "ore", 2, 40, 1000).bid.unwrap();
+        give(&mut m, alice(), ORE, 1);
+        ctx(alice(), ZERO, 1010);
+        m.fill_order(o.id, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Maren can't take it just now (shop_closed)")]
+    fn a_shut_shop_fills_no_orders() {
+        let mut m = nearly_broke();
+        let o = order(&mut m, "kelp", 1, 5, 1002).bid.unwrap();
+        sell_maren_ore(&mut m, 1, 20, 1003); // 160 - 20: below 150, so she shuts
+        assert!(m.get_market().shop.closed);
+        give(&mut m, alice(), KELP, 1);
+        ctx(alice(), ZERO, 1004);
+        m.fill_order(o.id, 1);
+    }
+
+    #[test]
+    fn an_offer_is_held_until_the_seller_accepts() {
+        let mut m = setup();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 3);
+        let l = list(&mut m, alice(), "kelp", 3, 4, 1000);
+        let b = offer(&mut m, bob(), l.id, 3, 2, 1010);
+        assert_eq!((b.kind.clone(), b.held, b.on), (BidKind::Offer, coins(6), Some(l.id)));
+        assert_eq!(m.get_market().bids_held, coins(6));
+        ctx(alice(), ZERO, 1020);
+        let r = m.answer_offer(b.id, "accept".into(), None);
+        assert_eq!(r.status, "sold");
+        assert!(transfers().contains(&(alice(), coins(6))));
+        assert_eq!(items(&m, bob())[KELP], 3);
+        assert!(m.get_listings().is_empty() && m.get_bids().is_empty());
+        let mv = m.get_market();
+        assert_eq!((mv.bids_held, mv.offers_taken, mv.board_sale_count), (ZERO, 1, 1));
+        assert_supply_adds_up(&m, &[alice(), bob()]);
+    }
+
+    #[test]
+    fn the_seller_counters_and_the_bidder_pays_the_difference() {
+        let mut m = setup();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 3);
+        let l = list(&mut m, alice(), "kelp", 3, 4, 1000);
+        let b = offer(&mut m, bob(), l.id, 3, 2, 1010);
+        ctx(alice(), ZERO, 1020);
+        let r = m.answer_offer(b.id, "counter".into(), Some(coins(3)));
+        assert_eq!((r.status.as_str(), r.bid.unwrap().counter), ("countered", Some(coins(3))));
+        ctx(bob(), coins(4), 1030); // 3 more are owed; 1 comes back
+        let sale = m.accept_counter(b.id);
+        assert_eq!(sale.total, coins(9));
+        let sent = transfers();
+        assert!(sent.contains(&(alice(), coins(9))) && sent.contains(&(bob(), coins(1))));
+        assert_eq!(items(&m, bob())[KELP], 3);
+        assert_eq!(m.get_market().bids_held, ZERO);
+    }
+
+    #[test]
+    fn declined_withdrawn_and_orphaned_offers_go_back() {
+        let mut m = setup();
+        join(&mut m, bob());
+        join(&mut m, carol());
+        give(&mut m, alice(), KELP, 4);
+        let l = list(&mut m, alice(), "kelp", 4, 4, 1000);
+        // declined
+        let b = offer(&mut m, bob(), l.id, 2, 2, 1010);
+        ctx(alice(), ZERO, 1020);
+        assert_eq!(m.answer_offer(b.id, "decline".into(), None).status, "declined");
+        assert!(transfers().contains(&(bob(), coins(4))));
+        // withdrawn
+        let b = offer(&mut m, bob(), l.id, 2, 3, 1030);
+        ctx(bob(), ZERO, 1040);
+        m.withdraw_offer(b.id);
+        assert!(transfers().contains(&(bob(), coins(6))));
+        // the notice runs short: an offer for more than is left goes back
+        let big = offer(&mut m, bob(), l.id, 4, 3, 1050);
+        let small = offer(&mut m, carol(), l.id, 1, 3, 1050);
+        ctx(acc("dave.testnet"), coins(8), 1060);
+        m.join();
+        m.buy_listing(l.id, Some(2));
+        assert!(transfers().contains(&(bob(), coins(12))));
+        assert_eq!(m.get_bids().iter().map(|b| b.id).collect::<Vec<_>>(), vec![small.id]);
+        // the notice comes down: every offer on it goes back
+        ctx(alice(), ZERO, 1070);
+        m.cancel_listing(l.id);
+        assert!(transfers().contains(&(carol(), coins(3))));
+        assert!(m.get_bids().is_empty());
+        assert_eq!(m.get_market().bids_held, ZERO);
+        let _ = big;
+    }
+
+    #[test]
+    fn offers_lapse_after_an_hour() {
+        let mut m = setup();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 2);
+        let l = list(&mut m, alice(), "kelp", 2, 4, 1000);
+        offer(&mut m, bob(), l.id, 2, 2, 1010);
+        give(&mut m, alice(), DRIFTWOOD, 1);
+        let l2 = list(&mut m, alice(), "driftwood", 1, 9, 1010 + 3601);
+        offer(&mut m, bob(), l2.id, 1, 5, 1010 + 3601); // (any bid call sweeps the lapsed ones)
+        assert!(transfers().contains(&(bob(), coins(4))));
+        assert_eq!(m.get_bids().len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Offer less than the notice asks, or just buy it")]
+    fn an_offer_is_below_the_asking_price() {
+        let mut m = setup();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 1);
+        let l = list(&mut m, alice(), "kelp", 1, 4, 1000);
+        offer(&mut m, bob(), l.id, 1, 4, 1010);
+    }
+
+    #[test]
+    #[should_panic(expected = "You already have an offer on that notice")]
+    fn one_offer_per_notice() {
+        let mut m = setup();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 2);
+        let l = list(&mut m, alice(), "kelp", 2, 4, 1000);
+        offer(&mut m, bob(), l.id, 1, 2, 1010);
+        offer(&mut m, bob(), l.id, 2, 3, 1011);
+    }
+
+    #[test]
+    #[should_panic(expected = "Attach your offer")]
+    fn an_offer_is_paid_up_front() {
+        let mut m = setup();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 2);
+        let l = list(&mut m, alice(), "kelp", 2, 4, 1000);
+        ctx(bob(), coins(3), 1010);
+        m.make_offer(l.id, 2, coins(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "That offer is not on your notice")]
+    fn only_the_seller_answers() {
+        let mut m = setup();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 2);
+        let l = list(&mut m, alice(), "kelp", 2, 4, 1000);
+        let b = offer(&mut m, bob(), l.id, 2, 2, 1010);
+        ctx(bob(), ZERO, 1020);
+        m.answer_offer(b.id, "accept".into(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "A counter-offer goes between their offer and your price")]
+    fn a_counter_goes_between_the_two_prices() {
+        let mut m = setup();
+        join(&mut m, bob());
+        give(&mut m, alice(), KELP, 2);
+        let l = list(&mut m, alice(), "kelp", 2, 4, 1000);
+        let b = offer(&mut m, bob(), l.id, 2, 2, 1010);
+        ctx(alice(), ZERO, 1020);
+        m.answer_offer(b.id, "counter".into(), Some(coins(4)));
+    }
+
+    #[test]
+    fn maren_answers_offers_on_her_notices_within_her_floor() {
+        let mut m = setup();
+        // she pins a pickaxe at 70 (floor 35)
+        ctx(merchant(), ZERO, 1000);
+        let l = m.shop_list_item("pickaxe".into(), 1, coins(70)).listing.unwrap();
+        let low = offer(&mut m, alice(), l.id, 1, 30, 1010);
+        ctx(merchant(), ZERO, 1020);
+        let r = m.answer_offer(low.id, "accept".into(), None);
+        assert_eq!((r.status.as_str(), r.reason.as_deref()), ("blocked", Some("below_price_floor")));
+        assert_eq!(m.get_blocked(Some(1))[0].reason, "below_price_floor");
+        // a counter below her floor is refused too; at 50 she may
+        assert_eq!(m.answer_offer(low.id, "counter".into(), Some(coins(34))).reason.as_deref(), Some("below_price_floor"));
+        assert_eq!(m.answer_offer(low.id, "counter".into(), Some(coins(50))).status, "countered");
+        ctx(alice(), coins(20), 1030);
+        m.accept_counter(low.id);
+        let mv = m.get_market();
+        assert_eq!((mv.stock[PICKAXE], mv.treasury), (1, coins(1050)));
+        assert_eq!(items(&m, alice())[PICKAXE], 1);
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    #[test]
+    fn silas_will_not_take_an_offer_below_what_it_cost_him() {
+        let mut m = setup_dealer();
+        let t = calm(1);
+        give(&mut m, alice(), ORE, 2);
+        let r = dealer_quote(&mut m, "ore", 2, 80, t); // he paid 40 each
+        ctx(alice(), ZERO, t);
+        m.accept_quote(r.quote.unwrap().id);
+        ctx(dealer(), ZERO, t + 10);
+        let l = m.dealer_list_item("ore".into(), 2, coins(55)).listing.unwrap();
+        let bob = bob_joined(&mut m);
+        let b = offer(&mut m, bob, l.id, 2, 35, t + 20);
+        ctx(dealer(), ZERO, t + 30);
+        assert_eq!(m.answer_offer(b.id, "accept".into(), None).reason.as_deref(), Some("below_cost"));
+        assert_eq!(m.get_dealer_blocked(Some(1))[0].reason, "below_cost");
+        assert_eq!(m.answer_offer(b.id, "counter".into(), Some(coins(45))).status, "countered");
+    }
+
+    fn bob_joined(m: &mut Market) -> AccountId {
+        join(m, bob());
+        bob()
+    }
+
+    /// `setup()` with one beacon lens on her shelf (floor 400).
+    fn with_lens() -> Market {
+        let mut m = setup();
+        ctx(owner(), YOCTO, 1000);
+        m.restock("beacon".into(), 1, coins(300));
+        join(&mut m, bob());
+        m
+    }
+
+    #[test]
+    fn the_highest_bid_wins_her_last_lens() {
+        let mut m = with_lens();
+        ctx(merchant(), ZERO, 1000);
+        let a = m.start_auction("beacon".into(), coins(450), 1_000_000 + 300_000);
+        // while it runs the lens is promised: she cannot quote it to anyone
+        let q = quote(&mut m, Side::Sell, "beacon", 1, coins(600), 1001);
+        assert_eq!(q.reason.as_deref(), Some("out_of_stock"));
+        ctx(alice(), coins(450), 1010);
+        m.bid_auction(a.id);
+        ctx(bob(), coins(500), 1020); // 5% over 450 is 472.5
+        let after = m.bid_auction(a.id);
+        assert!(transfers().contains(&(alice(), coins(450))), "the beaten bid goes back");
+        assert_eq!((after.bids, after.top.as_ref().unwrap().bidder.clone()), (2, bob()));
+        assert_eq!(m.get_market().bids_held, coins(500));
+        ctx(acc("anyone.testnet"), ZERO, 1300);
+        let done = m.settle_auction();
+        assert!(done.settled);
+        let mv = m.get_market();
+        assert_eq!((mv.stock[BEACON], mv.treasury, mv.auctions_sold, mv.bids_held), (0, coins(1500), 1, ZERO));
+        assert_eq!(items(&m, bob())[BEACON], 1);
+        assert_eq!(m.get_trades(Some(1))[0].total, coins(500));
+        assert_eq!(m.get_market().profit_yocto, coins(200).as_yoctonear().to_string());
+        assert_supply_adds_up(&m, &[alice(), bob()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Bid at least 473 coins")]
+    fn each_bid_beats_the_last_by_five_percent() {
+        let mut m = with_lens();
+        ctx(merchant(), ZERO, 1000);
+        let a = m.start_auction("beacon".into(), coins(450), 1_300_000);
+        ctx(alice(), coins(450), 1010);
+        m.bid_auction(a.id);
+        ctx(bob(), coins(470), 1020);
+        m.bid_auction(a.id);
+    }
+
+    #[test]
+    fn a_late_bid_keeps_the_auction_open() {
+        let mut m = with_lens();
+        ctx(merchant(), ZERO, 1000);
+        let a = m.start_auction("beacon".into(), coins(450), 1_120_000);
+        ctx(alice(), coins(450), 1110); // 10 s before the end
+        let after = m.bid_auction(a.id);
+        assert_eq!(after.ends_ms, 1_140_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "The auction is still running")]
+    fn nobody_settles_early() {
+        let mut m = with_lens();
+        ctx(merchant(), ZERO, 1000);
+        m.start_auction("beacon".into(), coins(450), 1_300_000);
+        ctx(alice(), ZERO, 1200);
+        m.settle_auction();
+    }
+
+    #[test]
+    fn an_auction_without_bids_leaves_the_lens_on_her_shelf() {
+        let mut m = with_lens();
+        ctx(merchant(), ZERO, 1000);
+        m.start_auction("beacon".into(), coins(450), 1_060_000);
+        ctx(alice(), ZERO, 1100);
+        let a = m.settle_auction();
+        assert!(a.settled && a.top.is_none());
+        assert_eq!(m.get_market().stock[BEACON], 1);
+        // and she can sell it again
+        assert_eq!(quote(&mut m, Side::Sell, "beacon", 1, coins(600), 1101).status, "posted");
+    }
+
+    #[test]
+    #[should_panic(expected = "The reserve may not be below her price floor")]
+    fn the_reserve_respects_her_floor() {
+        let mut m = with_lens();
+        ctx(merchant(), ZERO, 1000);
+        m.start_auction("beacon".into(), coins(399), 1_300_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "One auction at a time")]
+    fn one_auction_at_a_time() {
+        let mut m = with_lens();
+        ctx(owner(), YOCTO, 1000);
+        m.restock("beacon".into(), 1, coins(300));
+        ctx(merchant(), ZERO, 1000);
+        m.start_auction("beacon".into(), coins(450), 1_300_000);
+        m.start_auction("beacon".into(), coins(450), 1_300_000);
     }
 }

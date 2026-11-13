@@ -28,7 +28,7 @@ MARKET=$(get CONTRACT)
 OWNER=$(get OWNER)
 [ -n "$OWNER" ] || OWNER=${MARKET#market.}
 DEALER="dealer.$OWNER"
-METHODS="dealer_post_quote,dealer_cancel_quote,ship,dealer_list_item,dealer_buy_listing,cancel_listing"
+METHODS="dealer_post_quote,dealer_cancel_quote,ship,dealer_list_item,dealer_buy_listing,cancel_listing,answer_offer"
 NET="network-config testnet"
 SIGN="$NET sign-with-legacy-keychain send"
 DEALER_TREASURY=${DEALER_TREASURY:-0.8}
@@ -49,7 +49,7 @@ STATE=$(DEALER_KEY="$(get DEALER_KEY)" node --input-type=module -e '
     try {
       const key = await loadKey(process.env.DEALER_KEY);
       const ak = await near.rpc("query", { request_type: "view_access_key", finality: "final", account_id: dealer, public_key: key.publicKey });
-      keyOk = (ak.permission.FunctionCall?.method_names ?? []).includes("dealer_buy_listing");
+      keyOk = (ak.permission.FunctionCall?.method_names ?? []).includes("answer_offer");
     } catch {}
   }
   console.log(`${"dealer_id" in mv ? "new" : "old"} ${mv.dealer_id === dealer ? "in-town" : "away"} ${exists ? "exists" : "none"} ${keyOk ? "key-ok" : "no-key"}`);
@@ -64,7 +64,7 @@ if [ "$ACCOUNT" = none ]; then
 fi
 
 if [ "$KEY" = no-key ]; then
-  step "Giving Silas a key that can ONLY quote, ship and trade on the notice board"
+  step "Giving Silas a key that can ONLY quote, ship, trade on the notice board and answer offers"
   KEYS=$(node scripts/keygen.mjs); DEALER_SK=${KEYS%% *}; DEALER_PK=${KEYS##* }
   run near account add-key "$DEALER" grant-function-call-access \
     --allowance '0.25 NEAR' --contract-account-id "$MARKET" --function-names "$METHODS" \
