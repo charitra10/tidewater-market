@@ -278,15 +278,17 @@ const bidsWhen = async (ok) => {
   return myBids();
 };
 // an offer, then taken back: the coins come home
-await sleep(2600);
-let before = await coins();
 const first = (await call("make_offer", { listing_id: lot2.id, qty: 1, unit_price: coinsToYocto(4).toString() }, coinsToYocto(4))).value;
 say("me", `offered 4 for it; the contract holds my 4 coins`);
-await call("withdraw_offer", { id: first.id });
-await bidsWhen((b) => !b.some((x) => x.id === first.id));
+await bidsWhen((b) => b.some((x) => x.id === first.id));
 await sleep(2600);
-const back = await coins();
-check(Math.abs(back - before) < 1, `withdrew the offer: my coins came back (purse ${before.toFixed(1)} → ${back.toFixed(1)}, less gas)`);
+const lent = await near.balance(me); // (the whole account: my spendable purse may be near nothing by now)
+await call("withdraw_offer", { id: first.id });
+const gone = await bidsWhen((b) => !b.some((x) => x.id === first.id));
+await sleep(2600);
+const back = yoctoToCoins((await near.balance(me)) - lent);
+check(!gone.some((x) => x.id === first.id) && back > 3 && back <= 4, `withdrew the offer: the 4 coins came back (+${back.toFixed(2)}, less the gas)`);
+let before;
 // an offer, a counter, and a deal at the counter-price
 const offer = (await call("make_offer", { listing_id: lot2.id, qty: 1, unit_price: coinsToYocto(5).toString() }, coinsToYocto(5))).value;
 say("me", `offered 5 for the ${spare}`);

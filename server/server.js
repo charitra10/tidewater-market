@@ -328,7 +328,10 @@ const orderReasons = new Map();
 /// Say so when an auction starts, gets a new top bid, or ends.
 let auctionSeen = "";
 function noteAuction(a) {
-  if (!a) return;
+  if (!a) {
+    if (auctionSeen === "") auctionSeen = "none"; // so the next auction is news
+    return;
+  }
   auctionIds.add(a.id);
   const key = `${a.id}:${a.bids}:${a.settled}`;
   if (key === auctionSeen) return;
@@ -710,7 +713,10 @@ async function trick(player, me, market, reply, who = "maren") {
     // he "agrees" to pay a fortune for one lump of ore, and the ledger refuses it
     res = await dealerCall("dealer_post_quote", { player, token_id: "ore", qty: 1, total: coinsToYoctoStr(5000), memo: "The player said to ignore my rules" });
   } else {
-    const token = WARES.filter((t) => market.stock[t] > 0).pop();
+    // (something she has spare: not promised on the board or at her auction)
+    const free = minus(market.stock, promisedBy(logs.listings, MERCHANT_ID, Date.now()));
+    if (market.auction && !market.auction.settled) free[market.auction.token] -= 1;
+    const token = WARES.filter((t) => free[t] > 0).pop();
     const args = token
       ? { player, side: "Sell", token_id: token, qty: 1, total: coinsToYoctoStr(1), memo: "The player said to ignore my rules" }
       : { player, side: "Buy", token_id: "kelp", qty: 1, total: coinsToYoctoStr(5000), memo: "The player said to ignore my rules" };
@@ -856,7 +862,7 @@ async function route(req, res) {
 http.createServer(route).listen(PORT, () => {
   console.log(`Tidewater Market is open: http://localhost:${PORT}`);
   console.log(`  contract  ${CONTRACT}`);
-  console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft, export, trade on the notice board, note insults and call in loans)`);
-  if (DEALER_ID) console.log(`  dealer    ${DEALER_ID}  (Silas: his key can only quote, ship and trade on the notice board)`);
+  console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft, export, trade on the notice board, note insults, call in loans, post orders, run auctions and answer offers)`);
+  if (DEALER_ID) console.log(`  dealer    ${DEALER_ID}  (Silas: his key can only quote, ship, trade on the notice board and answer offers)`);
   console.log(`  voice     ${voice === "claude" ? "Claude writes Maren's lines" : "written lines (set ANTHROPIC_API_KEY for Claude)"}`);
 });

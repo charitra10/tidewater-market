@@ -198,9 +198,8 @@
   #pin-price { width: 76px; padding: 7px; border: 1px solid var(--line); border-radius: 9px; font: inherit; font-weight: 700; text-align: center; background: #fffaf0; }
   #pin .btn[data-pin-go] { width: 100%; margin-top: 6px; padding: 10px; font-size: 15px; }
   #board-sales { margin: 0; padding: 0; list-style: none; }
-  .item.with-offers { flex-wrap: wrap; }
-  .offer-line { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 0 36px; padding: 6px 8px; border-radius: 8px; background: rgba(201,157,104,0.14); font-size: 12.5px; }
-  .offer-line > span:first-child { flex: 1 1 180px; }
+  .offer-line { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: -2px 0 0; padding: 6px 8px; border-radius: 8px; background: rgba(201,157,104,0.14); font-size: 12.5px; }
+  .offer-line:not(.edit) > span:first-child { flex: 1 1 180px; }
   .offer-line.theirs { background: rgba(70,140,90,0.12); }
   .offer-line.edit .sub { flex-basis: 100%; }
   .offer-line b { font-variant-numeric: tabular-nums; }

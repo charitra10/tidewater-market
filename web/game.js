@@ -1337,8 +1337,8 @@ function offerLine(l) {
   }
   if (offerEdit?.id !== l.id) return "";
   const total = offerEdit.qty * offerEdit.price;
-  const qty = l.qty > 1 ? `<span class="qty"><button data-oq="-1">−</button>${offerEdit.qty}<button data-oq="1">+</button></span>` : "";
-  return `<div class="offer-line edit">${qty}<button class="step" data-op="-1">−</button><b>${offerEdit.price}</b><button class="step" data-op="1">+</button><span class="sub">each</span>
+  const qty = l.qty > 1 ? `<span class="qty"><button data-oq="-1">−</button>${offerEdit.qty}<button data-oq="1">+</button></span><span>at</span>` : "<span>Offer</span>";
+  return `<div class="offer-line edit">${qty}<span class="qty"><button data-op="-1">−</button>${offerEdit.price}<button data-op="1">+</button></span><span>each</span>
     <button class="btn small" data-offer-go="${l.id}" ${total > coins || busy ? "disabled" : ""}>Offer ${total}</button>
     <span class="sub">The ${total} coins wait with the contract until ${who(l.seller)} answers, and come back if they say no.</span></div>`;
 }
@@ -1350,7 +1350,7 @@ function offersFor(l) {
       const editing = counterEdit?.id === b.id;
       const head = `<span><b>${who(b.bidder)}</b> offers ${fmt(b.unit)} each for ${b.qty} (${fmt(b.held)} held)${b.counter ? `. You countered at ${fmt(b.counter)}; waiting for them.` : ""}</span>`;
       const counter = editing
-        ? `<button class="step" data-cp="-1">−</button><b>${counterEdit.price}</b><button class="step" data-cp="1">+</button><button class="btn small" data-counter-go="${b.id}" ${busy ? "disabled" : ""}>Counter at ${counterEdit.price}</button>`
+        ? `<span class="qty"><button data-cp="-1">−</button>${counterEdit.price}<button data-cp="1">+</button></span><button class="btn small" data-counter-go="${b.id}" ${busy ? "disabled" : ""}>Counter at ${counterEdit.price}</button>`
         : b.counter
           ? ""
           : `<button class="btn small plain" data-counter="${b.id}" ${busy || l.unit - b.unit < 2 ? "disabled" : ""}>Counter</button>`;
