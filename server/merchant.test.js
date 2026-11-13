@@ -1,7 +1,7 @@
 // Tests for Maren's pricing and bargaining (no network). Run: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { unitAsk, unitBid, listPrice, priceBoard, planWork, openHaggle, haggle, readIntent, TARGET, VALUE } from "./merchant.js";
+import { unitAsk, unitBid, listPrice, priceBoard, planWork, openHaggle, haggle, readIntent, boardPicks, usedToolPrice, BOARD_GRACE_MS, TARGET, VALUE } from "./merchant.js";
 import { writtenLine, lot } from "./voice.js";
 
 const market = (over = {}) => ({
@@ -171,4 +171,72 @@ test("written lines carry the price", () => {
 
 test("targets exist for every priced item", () => {
   for (const t of Object.keys(VALUE)) assert.ok(TARGET[t] > 0);
+});
+
+// ---------- the notice board ----------
+const NOW = 10_000_000;
+const notice = (over = {}) => ({ id: 1, seller: "g1.test", token: "ore", qty: 1, unit: 10, listedMs: NOW - 60_000, expiresMs: NOW + 3_600_000, ...over });
+
+test("she buys raw goods off the board at or under her own bid", () => {
+  const m = market();
+  const bid = unitBid(m, "ore");
+  assert.deepEqual(boardPicks(m, [notice({ unit: Math.floor(bid) })], NOW).map((p) => p.qty), [1]);
+  assert.deepEqual(boardPicks(m, [notice({ unit: Math.ceil(bid) + 1 })], NOW), []);
+});
+
+test("from a big lot she takes only as many as her falling bid allows", () => {
+  const m = market({ stock: { kelp: 0 } });
+  const unit = Math.floor(unitBid(m, "kelp", 6)); // worth it for the first few units only
+  const [pick] = boardPicks(m, [notice({ token: "kelp", qty: 40, unit })], NOW);
+  assert.ok(pick.qty > 0 && pick.qty < 40, `took ${pick?.qty}`);
+  assert.equal(pick.total, pick.qty * unit);
+});
+
+test("players get first pick of a fresh notice", () => {
+  const m = market();
+  assert.deepEqual(boardPicks(m, [notice({ unit: 1, listedMs: NOW - BOARD_GRACE_MS.raw + 1000 })], NOW), []);
+  assert.deepEqual(boardPicks(m, [notice({ token: "pickaxe", unit: 1, listedMs: NOW - 60_000 })], NOW), []);
+});
+
+test("she buys a used tool only when she is short of it, and cheaply", () => {
+  const short = market({ stock: { boat: 0 } });
+  const fair = usedToolPrice(short, "boat");
+  const old = NOW - BOARD_GRACE_MS.ware - 1000;
+  assert.equal(boardPicks(short, [notice({ token: "boat", unit: Math.floor(fair), listedMs: old })], NOW).length, 1);
+  assert.equal(boardPicks(short, [notice({ token: "boat", unit: Math.ceil(fair) + 1, listedMs: old })], NOW).length, 0);
+  const stocked = market({ stock: { boat: TARGET.boat } });
+  assert.equal(boardPicks(stocked, [notice({ token: "boat", unit: 10, listedMs: old })], NOW).length, 0);
+});
+
+test("buying a tool from her and selling it back to her never pays", () => {
+  // the best haggle a player can get: openHaggle gives at most 20 % + 4 % for a
+  // regular + 2 % for a delighted Maren
+  const BEST = 1 - 0.26;
+  for (const token of ["pickaxe", "boat", "beacon"]) {
+    for (const treasury of [100, 1500]) {
+      for (let stock = 1; stock <= TARGET[token] + 4; stock++) {
+        const m = market({ treasury, stock: { [token]: stock }, avgCost: { [token]: 0 } });
+        const cheapestBuy = Math.max(m.floor[token], listPrice(m, "sell", token, 1) * BEST);
+        const sellBack = usedToolPrice(market({ treasury, stock: { [token]: stock - 1 } }), token);
+        assert.ok(sellBack < cheapestBuy, `${token}, stock ${stock}, treasury ${treasury}: sells back for ${sellBack}, bought for ${cheapestBuy}`);
+      }
+    }
+  }
+});
+
+test("she skips expired notices, prices over her ceiling, and what she cannot afford", () => {
+  const m = market({ stock: { ore: 0 } });
+  assert.deepEqual(boardPicks(m, [notice({ unit: 1, expiresMs: NOW - 1 })], NOW), []);
+  assert.deepEqual(boardPicks(m, [notice({ unit: m.ceiling.ore + 1 })], NOW), []);
+  assert.deepEqual(boardPicks(market({ treasury: 5 }), [notice({ unit: 8 })], NOW), []);
+  const capped = { ...m, boughtInWindow: 995, windowLimit: 1000 };
+  assert.deepEqual(boardPicks(capped, [notice({ unit: 8 })], NOW), []);
+});
+
+test("cheapest notices first, and her shelf fills as she goes", () => {
+  const m = market({ stock: { pearl: 0 } });
+  const picks = boardPicks(m, [notice({ id: 1, token: "pearl", qty: 3, unit: 40 }), notice({ id: 2, token: "pearl", qty: 3, unit: 20 })], NOW);
+  assert.equal(picks[0].id, 2);
+  const taken = picks.reduce((n, p) => n + p.qty, 0);
+  assert.ok(taken < 6 || unitBid(m, "pearl", 5) >= 40);
 });

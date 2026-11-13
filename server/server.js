@@ -2,7 +2,8 @@
 // Tidewater Market server. Three jobs:
 //   1. Run Maren, the merchant NPC: bargain with players, post her quotes
 //      on-chain with HER key (which can only call post_quote / cancel_quote /
-//      craft / export), and keep her workshop going.
+//      craft / export / shop_buy_listing), keep her workshop going, and buy
+//      what is cheap enough off the players' notice board.
 //   2. Welcome guests: create a funded testnet account for a new player whose
 //      key never leaves their browser.
 //   3. Serve the game (the web/ folder).
@@ -15,7 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
-import { TOKENS, RAW, WARES, TARGET, RECIPES, priceBoard, unitBid, planWork, openHaggle, haggle, readIntent, MOODS } from "./merchant.js";
+import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS } from "./merchant.js";
 import { say, writtenLine, initVoice, lot } from "./voice.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -61,9 +62,25 @@ let policy = null;
 // What other players have been doing, straight from the contract's logs. Each
 // log is fetched again only when its counter in get_market moves, so a quiet
 // market costs no extra RPC calls.
-const logs = { trades: [], blocked: [], keepers: [], seen: { trades: -1, blocked: -1, beacons: "" } };
+const logs = { trades: [], blocked: [], keepers: [], listings: [], boardSales: [], seen: { trades: -1, blocked: -1, beacons: "", board: -1, boardSales: -1 } };
+const toListing = (l) => ({
+  id: l.id,
+  seller: l.seller,
+  token: l.token_id,
+  qty: l.qty,
+  unit: yoctoToCoins(l.unit_price),
+  unitYocto: l.unit_price,
+  listedMs: l.listed_ms,
+  expiresMs: l.expires_ms,
+});
 async function refreshLogs(mv) {
   const jobs = [];
+  if (mv.board_version !== undefined && mv.board_version !== logs.seen.board) {
+    jobs.push(near.view(CONTRACT, "get_listings").then((l) => ((logs.listings = l.map(toListing)), (logs.seen.board = mv.board_version))));
+  }
+  if (mv.board_sale_count !== undefined && mv.board_sale_count !== logs.seen.boardSales) {
+    jobs.push(near.view(CONTRACT, "get_board_sales", { limit: 12 }).then((b) => ((logs.boardSales = b), (logs.seen.boardSales = mv.board_sale_count))));
+  }
   if (mv.trade_count !== logs.seen.trades) {
     jobs.push(near.view(CONTRACT, "get_trades", { limit: 20 }).then((t) => ((logs.trades = t), (logs.seen.trades = mv.trade_count))));
   }
@@ -92,6 +109,18 @@ function feed() {
     })),
     ...logs.blocked.map((b) => ({ kind: "refused", player: b.player, token: b.token_id, reason: b.reason, at: b.timestamp_ms })),
     ...logs.keepers.map((k) => ({ kind: "keeper", player: k.player, at: k.lit_ms })),
+    // board sales name the buyer as `player` (so a seller still hears that their goods sold)
+    ...logs.boardSales.map((b) => ({
+      kind: "board_sale",
+      player: b.buyer,
+      seller: b.seller,
+      maren: b.buyer === MERCHANT_ID,
+      token: b.token_id,
+      qty: b.qty,
+      coins: Math.round(yoctoToCoins(b.total)),
+      at: b.timestamp_ms,
+    })),
+    ...logs.listings.map((l) => ({ kind: "listed", player: l.seller, token: l.token, qty: l.qty, unit: l.unit, at: l.listedMs })),
   ];
   return items.sort((a, b) => b.at - a.at).slice(0, 20);
 }
@@ -139,6 +168,8 @@ async function getMarket(fresh = false) {
     tradeCount: mv.trade_count,
     blockedCount: mv.blocked_count,
     playerCount: mv.player_count,
+    boughtInWindow: mv.window_resets_at_ms ? yoctoToCoins(mv.bought_in_window) : 0,
+    windowLimit: yoctoToCoins(pol.buy_window_limit),
   };
   remember(market);
   cache = { at: Date.now(), market };
@@ -180,6 +211,7 @@ async function workshopTick() {
         addNews(`The mainland boat took ${lot(job.token, job.qty)} for ${pay} coins.`);
       }
     }
+    await boardTick(jobs.length ? await getMarket(true) : market);
   } catch (e) {
     console.warn("workshop:", e.message);
   } finally {
@@ -187,6 +219,27 @@ async function workshopTick() {
   }
 }
 setInterval(workshopTick, 10_000);
+
+/// Between customers Maren reads the notice board, and buys what is cheap
+/// enough (merchant.js decides; the contract's guard rails still apply).
+async function boardTick(market) {
+  const picks = boardPicks(market, logs.listings, Date.now()).slice(0, 3);
+  for (const pick of picks) {
+    try {
+      const res = await merchantCall("shop_buy_listing", { id: pick.id, qty: pick.qty });
+      if (res.value.status === "bought") addNews(`Maren bought ${lot(pick.token, pick.qty)} off ${whoName(pick.seller)}'s notice for ${Math.round(pick.total)} coins.`);
+      else console.log(`  · the ledger refused Maren's board buy: ${res.value.reason}`);
+    } catch (e) {
+      console.warn("board:", e.message); // e.g. a player bought it a moment earlier
+    }
+  }
+}
+
+/// "Guest 7f1f" for a guest account, the first part of the name otherwise.
+function whoName(account) {
+  const g = account.match(/^g([0-9a-f]{4})[0-9a-f]*\./);
+  return g ? `Guest ${g[1]}` : account.split(".")[0];
+}
 
 // ---------- players Maren remembers (in memory only) ----------
 const people = new Map(); // account -> { mood, session, coolUntil, lastTrick }
@@ -376,7 +429,7 @@ async function route(req, res) {
       return send(200, { network: "testnet", contract: CONTRACT, merchantId: MERCHANT_ID, rpcUrls: RPC_URLS, guestNear: GUEST_NEAR, explorer: "https://testnet.nearblocks.io", voice });
     }
     if (url.pathname === "/api/market") {
-      const market = await getMarket();
+      const market = await getMarket(url.searchParams.has("fresh")); // "fresh": right after the player changed something
       const player = url.searchParams.get("player");
       if (player) lastActivity = Date.now();
       return send(200, {
@@ -394,6 +447,8 @@ async function route(req, res) {
         history,
         players: market.playerCount,
         deals: market.tradeCount,
+        notices: { listings: logs.listings, sales: logs.boardSales.slice(0, 5).map((b) => ({ ...b, maren: b.buyer === MERCHANT_ID })) },
+        value: VALUE,
       });
     }
     if (url.pathname === "/api/guest" && req.method === "POST") {
@@ -422,6 +477,6 @@ async function route(req, res) {
 http.createServer(route).listen(PORT, () => {
   console.log(`Tidewater Market is open: http://localhost:${PORT}`);
   console.log(`  contract  ${CONTRACT}`);
-  console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft and export)`);
+  console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft, export and buy off the notice board)`);
   console.log(`  voice     ${voice === "claude" ? "Claude writes Maren's lines" : "written lines (set ANTHROPIC_API_KEY for Claude)"}`);
 });

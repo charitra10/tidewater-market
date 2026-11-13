@@ -100,6 +100,60 @@ export function planWork(market, exportPrice = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// The notice board: what Maren buys off players' notices
+// ---------------------------------------------------------------------------
+
+/// Players get first pick: Maren leaves a fresh notice alone for this long.
+export const BOARD_GRACE_MS = { raw: 15_000, ware: 180_000 };
+/// She buys a used tool for at most this fraction of what it is worth on a quiet day.
+export const USED_TOOL_DISCOUNT = 0.55;
+
+/// The most she pays for a used tool while she holds `stock` of it: nothing
+/// unless she is short, then a discount on its everyday value (never on her
+/// scarcity price, or players could buy her last one and sell it straight back).
+export function usedToolPrice(market, token, stock = market.stock[token]) {
+  if (stock >= TARGET[token]) return 0;
+  return Math.min(VALUE[token], unitAsk(market, token, stock)) * USED_TOOL_DISCOUNT;
+}
+
+/// Which notices Maren buys, and how many from each.
+///   Raw goods: each unit she would bid at least the asking price for (her bid
+///     drops with every unit she takes, so a big lot may be bought in part).
+///   Tools: only while she is short of them, and only at a good discount, so
+///     buying from her and selling back to her cannot turn a profit.
+/// `listings`: [{ id, seller, token, qty, unit (coins), listedMs, expiresMs }].
+/// `market` may carry `boughtInWindow` and `windowLimit` (coins) for her spending cap.
+/// Returns [{ id, seller, token, qty, total }], cheapest notices first.
+export function boardPicks(market, listings, now) {
+  const stock = { ...market.stock };
+  let treasury = market.treasury;
+  let spent = market.boughtInWindow ?? 0;
+  const limit = market.windowLimit ?? Infinity;
+  const picks = [];
+  const open = listings.filter((l) => now <= l.expiresMs).sort((a, b) => a.unit - b.unit || a.listedMs - b.listedMs);
+  for (const l of open) {
+    const raw = RAW.includes(l.token);
+    if (!raw && !WARES.includes(l.token)) continue;
+    if (now - l.listedMs < (raw ? BOARD_GRACE_MS.raw : BOARD_GRACE_MS.ware)) continue;
+    if (l.unit > (market.ceiling[l.token] ?? Infinity)) continue; // the contract would refuse it
+    const books = () => ({ ...market, stock, treasury });
+    let qty = 0;
+    for (; qty < l.qty; qty++) {
+      const s = stock[l.token] + qty;
+      const fair = raw ? unitBid(books(), l.token, s) : usedToolPrice(books(), l.token, s);
+      if (l.unit > fair || (qty + 1) * l.unit > treasury || spent + (qty + 1) * l.unit > limit) break;
+    }
+    if (qty === 0) continue;
+    const total = qty * l.unit;
+    picks.push({ id: l.id, seller: l.seller, token: l.token, qty, total });
+    stock[l.token] += qty;
+    treasury -= total;
+    spent += total;
+  }
+  return picks;
+}
+
+// ---------------------------------------------------------------------------
 // Haggling
 // ---------------------------------------------------------------------------
 
