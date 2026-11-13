@@ -1,7 +1,7 @@
 // Tests for Maren's pricing and bargaining (no network). Run: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { unitAsk, unitBid, listPrice, priceBoard, planWork, openHaggle, haggle, readIntent, boardPicks, usedToolPrice, BOARD_GRACE_MS, TARGET, VALUE } from "./merchant.js";
+import { unitAsk, unitBid, listPrice, priceBoard, planWork, openHaggle, haggle, readIntent, boardPicks, usedToolPrice, BOARD_GRACE_MS, TARGET, VALUE } from "../web/merchant.js";
 import { writtenLine, lot } from "./voice.js";
 
 const market = (over = {}) => ({

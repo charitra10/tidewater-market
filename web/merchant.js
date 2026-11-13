@@ -6,7 +6,7 @@
 //
 // All prices here are whole "coins" (1 coin = 0.001 NEAR).
 
-import { tideBidFactor, stormBidFactor, eventBidFactor, eventAskFactor, EVENT_TEXT, nextTide, TIDE_PERIOD_MS } from "../web/tide.js";
+import { tideBidFactor, stormBidFactor, eventBidFactor, eventAskFactor, EVENT_TEXT, nextTide, TIDE_PERIOD_MS } from "./tide.js";
 
 export const TOKENS = ["kelp", "driftwood", "ore", "pearl", "rope", "pickaxe", "boat", "beacon"];
 export const RAW = ["kelp", "driftwood", "ore", "pearl"]; // she buys these
@@ -22,6 +22,9 @@ export const RECIPES = {
   boat: { driftwood: 4, rope: 2, ore: 2 },
   beacon: { pearl: 3, ore: 2, rope: 1 },
 };
+/// She stops buying a raw good once she holds this many times what she likes
+/// to keep: goods she can't sell or ship would only drain her purse.
+export const OVERFLOW = 5;
 /// Treasury (in coins) at which she feels comfortable.
 export const COMFORTABLE = 600;
 
@@ -220,7 +223,9 @@ export function bidWhy(market, token, stock = market.stock[token]) {
   const demand = demandFactor(market, "bid", token);
   const sold = market.recent?.[token]?.soldN ?? 0;
   steps.push({ key: "demand", factor: demand, note: sold ? `Players sold her ${sold} in the last ${minutes(DEMAND_WINDOW_MS)} minutes` : "Nobody has sold her any lately" });
-  const base = VALUE[token] * 0.62 * need * cash * (tide * storm) * demand * happening;
+  const full = stock >= TARGET[token] * OVERFLOW ? 0 : 1;
+  if (!full) steps.push({ key: "full", factor: 0, note: `Her shelves are overflowing (${stock}; she likes ${target}), so she won't buy more until she ships some` });
+  const base = VALUE[token] * 0.62 * need * cash * (tide * storm) * demand * happening * full;
   const ceiling = market.ceiling[token] ?? Infinity;
   const price = Math.min(base, ceiling);
   const limits = [{ key: "ceiling", value: ceiling, binds: base > ceiling, note: `The ledger won't let her pay more than ${n1(ceiling)}` }];
@@ -234,6 +239,21 @@ export function unitBid(market, token, stock = market.stock[token]) {
 
 /// Her opening price for a lot. Each unit is priced as the shelf changes, so
 /// big lots get dearer to buy and cheaper to sell.
+/// How many of a lot of `qty` Maren will buy: each unit is priced at the shelf
+/// it would land on, and she won't take any past the point where she would pay
+/// nothing (her shelves overflowing). The rest of the lot stays with the player.
+export function willTake(market, token, qty) {
+  let n = 0;
+  while (n < qty && unitBid(market, token, market.stock[token] + n) > 0) n++;
+  return n;
+}
+/// The same for Silas and his hold.
+export function dealerWillTake(dealer, token, qty) {
+  let n = 0;
+  while (n < qty && dealerBid(dealer, token, dealer.stock[token] + n) > 0) n++;
+  return n;
+}
+
 export function listPrice(market, side, token, qty) {
   let total = 0;
   for (let i = 0; i < qty; i++) {
@@ -276,7 +296,9 @@ export function planWork(market, exportPrice = {}) {
   // ship what is piling up, a few at a time (the boat to the mainland is small;
   // it stays in harbour in a storm, and the contract would refuse it anyway)
   if (market.storm?.active) return jobs;
-  for (const token of RAW) {
+  // what is most over her target first: the mainland's purse is limited, and every
+  // good needs relief (cheap kelp is all a new player has to sell)
+  for (const token of [...RAW].sort((a, b) => stock[b] / TARGET[b] - stock[a] / TARGET[a])) {
     const surplus = stock[token] - Math.ceil(TARGET[token] * 1.5);
     // ... but never at a loss: goods she overpaid for stay on the shelf (and push
     // her bids down) until cheaper stock brings her average cost under the export price
@@ -349,6 +371,7 @@ export const MOODS = ["sour", "wary", "even", "warm", "delighted"]; // mood -2..
 
 /// Start bargaining over a lot. `rng` is injectable for tests.
 export function openHaggle(market, { side, token, qty, trades = 0, mood = 0 }, rng = Math.random) {
+  if (side === "buy") qty = Math.max(1, Math.min(qty, willTake(market, token, qty))); // (none past an overflowing shelf)
   const list = listPrice(market, side, token, qty);
   // How far she will really go, hidden from the player.
   let give = 0.12 + rng() * 0.08; // 12-20 %
@@ -535,6 +558,15 @@ export function readIntent(text) {
 export const DEALER_TOKENS = ["ore", "pearl"];
 /// How much of each he likes in his hold before he ships it off.
 export const DEALER_HOLD = { ore: 4, pearl: 3 };
+/// He stops buying a good once he holds this many times what his hold is built for.
+export const DEALER_CRAMMED = 3;
+/// What one merchant may spend of the mainland's purse in a round. Maren's
+/// exports and Silas's shipments both draw on it; while both are trading, each
+/// may use at most half of what is in it, or whoever goes first takes it all and
+/// the other can never ship (found by the fast-forward, web/sim-engine.js).
+export function mainlandShare(mainland, otherTrading) {
+  return otherTrading ? mainland / 2 : mainland;
+}
 /// Treasury (in coins) at which he feels flush.
 export const DEALER_COMFORTABLE = 500;
 
@@ -549,6 +581,9 @@ export function dealerBidWhy(dealer, token, stock = dealer.stock[token]) {
   if (!city) return { price: 0, base: 0, steps: [{ key: "trade", value: 0, note: "He doesn't deal in it" }], limits: [], capped: false };
   if (dealer.storm?.active) return { price: 0, base: 0, steps: [{ key: "storm", value: 0, note: "Storm: his boat is battened down, and he buys nothing until it passes" }], limits: [], capped: false };
   const hold = DEALER_HOLD[token];
+  if (stock >= hold * DEALER_CRAMMED) {
+    return { price: 0, base: 0, steps: [{ key: "full", value: 0, note: `His hold is crammed (${stock}; it takes ${hold}): he buys nothing more until he ships` }], limits: [], capped: false };
+  }
   const appetite = clamp(1.05 - (0.5 * stock) / hold, 0.3, 1.05);
   const cash = clamp(dealer.treasury / DEALER_COMFORTABLE, 0.3, 1);
   const tide = tideBidFactor(token, dealer.tide);
@@ -587,6 +622,7 @@ export function dealerBoard(dealer) {
 /// than Maren (6-12 %) and loses patience sooner. Same session shape, so
 /// `haggle` plays it out.
 export function openDealerHaggle(dealer, { token, qty, trades = 0, mood = 0 }, rng = Math.random) {
+  qty = Math.max(1, Math.min(qty, dealerWillTake(dealer, token, qty))); // (none past a crammed hold)
   let list = 0;
   for (let i = 0; i < qty; i++) list += dealerBid(dealer, token, dealer.stock[token] + i);
   list = Math.round(list);
@@ -609,10 +645,13 @@ export function shipPlan(dealer, mainland, promised = {}) {
   const jobs = [];
   let fund = mainland;
   for (const token of DEALER_TOKENS) {
-    const qty = dealer.stock[token] - (promised[token] ?? 0);
-    const pay = qty * (dealer.cityPrice[token] ?? 0);
-    const sailing = qty >= DEALER_HOLD[token] || (qty > 0 && dealer.tide?.phase === "high");
-    if (sailing && pay > 0 && pay <= fund) {
+    const free = dealer.stock[token] - (promised[token] ?? 0);
+    const city = dealer.cityPrice[token] ?? 0;
+    const sailing = free >= DEALER_HOLD[token] || (free > 0 && dealer.tide?.phase === "high");
+    // as much as the mainland's purse can pay for (it is shared with Maren)
+    const qty = city > 0 ? Math.min(free, Math.floor(fund / city)) : 0;
+    const pay = qty * city;
+    if (sailing && qty > 0) {
       jobs.push({ token, qty, pay });
       fund -= pay;
     }

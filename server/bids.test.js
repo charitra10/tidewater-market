@@ -2,7 +2,7 @@
 // Run: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { shortfall, orderPlan, orderDeadline, staleOrders, auctionPlan, offerAnswer, leastFor, unitBid, ORDER_PREMIUM, AUCTION_REST_MS, TERMS } from "./merchant.js";
+import { shortfall, orderPlan, orderDeadline, staleOrders, auctionPlan, offerAnswer, leastFor, unitBid, ORDER_PREMIUM, AUCTION_REST_MS, TERMS } from "../web/merchant.js";
 import { tideAt, TIDE_PERIOD_MS } from "../web/tide.js";
 
 const NOW = 1_794_610_000_000;

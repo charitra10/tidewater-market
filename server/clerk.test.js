@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { clerkWhy, clerkLeast, clerkShouldReprice, clerkNote, CLERK, SHOP_KINDS, TERMS, unitBid, unitAsk, offerAnswer } from "./merchant.js";
+import { clerkWhy, clerkLeast, clerkShouldReprice, clerkNote, CLERK, SHOP_KINDS, TERMS, unitBid, unitAsk, offerAnswer } from "../web/merchant.js";
 import { tideAt } from "../web/tide.js";
 
 const NOW = 1_794_610_000_000;

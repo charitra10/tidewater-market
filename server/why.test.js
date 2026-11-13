@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import {
   askWhy, bidWhy, dealerBidWhy, unitAsk, unitBid, dealerBid, priceBoard, dealerBoard, recentDemand, demandFactor, haggleWhy, openHaggle, haggle,
   marenNotices, silasNotices, TARGET, VALUE, RECIPES, RAW, WARES, COMFORTABLE, DEALER_HOLD, DEALER_COMFORTABLE, DEMAND_SWING, DEMAND_HALF_LIFE_MS, DEMAND_WINDOW_MS,
-} from "./merchant.js";
+} from "../web/merchant.js";
 import { tideBidFactor, stormBidFactor, PHASES } from "../web/tide.js";
 
 const FLOOR = { kelp: 2, driftwood: 3, ore: 15, pearl: 40, rope: 12, pickaxe: 35, boat: 140, beacon: 350 };

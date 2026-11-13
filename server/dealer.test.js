@@ -1,8 +1,8 @@
-// Silas, the pearl and ore dealer (server/merchant.js), and how he competes
+// Silas, the pearl and ore dealer (web/merchant.js), and how he competes
 // with Maren. No network. Run: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dealerBid, dealerBoard, openDealerHaggle, shipPlan, haggle, unitBid, boardPicks, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, MERCHANT_NOTICE_MS, DEALER_HOLD, DEALER_TOKENS, TARGET } from "./merchant.js";
+import { dealerBid, dealerBoard, openDealerHaggle, shipPlan, haggle, unitBid, boardPicks, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, MERCHANT_NOTICE_MS, DEALER_HOLD, DEALER_TOKENS, TARGET } from "../web/merchant.js";
 import { writtenLine } from "./voice.js";
 
 const zero = { kelp: 0, driftwood: 0, ore: 0, pearl: 0, rope: 0, pickaxe: 0, boat: 0, beacon: 0 };

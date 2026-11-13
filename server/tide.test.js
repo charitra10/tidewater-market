@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { tideAt, tideHeight, nextTide, tideBidFactor, TIDE_PERIOD_MS, PHASES, mix32, stormAt, stormLevel, stormBidFactor, STORM_BLOCK_MS, STORM_MS, eventAt, eventBidFactor, EVENTS, EVENT_BLOCK_MS } from "../web/tide.js";
-import { unitBid, unitAsk, askWhy, priceBoard, openHaggle, boardPicks, planWork, RAW } from "./merchant.js";
+import { unitBid, unitAsk, askWhy, priceBoard, openHaggle, boardPicks, planWork, RAW } from "../web/merchant.js";
 import { writtenLine, TIDE_WHY } from "./voice.js";
 
 const market = (tide, over = {}) => ({

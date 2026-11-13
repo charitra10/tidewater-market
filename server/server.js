@@ -16,7 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
-import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand, repMood, TERMS, orderPlan, staleOrders, orderWhy, auctionPlan, leastFor, offerAnswer, SHOP_KINDS, clerkWhy, clerkLeast, clerkShouldReprice, clerkNote } from "./merchant.js";
+import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand, repMood, TERMS, OVERFLOW, mainlandShare, orderPlan, staleOrders, orderWhy, auctionPlan, leastFor, offerAnswer, SHOP_KINDS, clerkWhy, clerkLeast, clerkShouldReprice, clerkNote } from "../web/merchant.js";
 import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
 import { tideAt, tideBidFactor, stormAt, stormBidFactor, eventAt } from "../web/tide.js";
 
@@ -289,6 +289,7 @@ async function getMarket(fresh = false) {
     playerCount: mv.player_count,
     boughtInWindow: mv.window_resets_at_ms ? yoctoToCoins(mv.bought_in_window) : 0,
     windowLimit: yoctoToCoins(pol.buy_window_limit),
+    windowMs: Number(pol.window_sec) * 1000,
     tide: tideAt(Date.now()),
     storm: stormAt(Date.now()),
     event: eventAt(Date.now()),
@@ -306,6 +307,7 @@ async function getMarket(fresh = false) {
       ceiling: byToken(dv.policy.ceiling, yoctoToCoins),
       cityPrice: byToken(dv.policy.city_price, yoctoToCoins),
       windowLimit: yoctoToCoins(dv.policy.buy_window_limit),
+      windowMs: Number(dv.policy.window_sec) * 1000,
       boughtInWindow: dv.window_resets_at_ms ? yoctoToCoins(dv.bought_in_window) : 0,
       profit: yoctoToCoins(dv.profit_yocto.replace("-", "")) * (dv.profit_yocto.startsWith("-") ? -1 : 1),
       tradeCount: dv.trade_count,
@@ -501,10 +503,13 @@ async function workshopTick() {
         const made = { rope: "twisted kelp into rope", pickaxe: "hammered together a pickaxe", boat: "finished building a boat", beacon: "polished a new beacon lens" }[job.token];
         addNews(`Maren ${made}${job.qty > 1 ? ` (x${job.qty})` : ""}.`);
       } else {
-        const pay = Math.round(market.exportPrice[job.token] * job.qty);
-        if (pay > market.mainland) continue;
-        await merchantCall("export", { token_id: job.token, qty: job.qty });
-        addNews(`The mainland boat took ${lot(job.token, job.qty)} for ${pay} coins.`);
+        // as many as her share of the mainland's purse pays for (half is Silas's while he trades)
+        const budget = mainlandShare(market.mainland, dealerHere(market) && !market.dealer.shop?.closed);
+        const qty = Math.min(job.qty, Math.floor(budget / market.exportPrice[job.token]));
+        if (qty < 1) continue;
+        const pay = Math.round(market.exportPrice[job.token] * qty);
+        await merchantCall("export", { token_id: job.token, qty });
+        addNews(`The mainland boat took ${lot(job.token, qty)} for ${pay} coins.`);
       }
     }
     if (cache.at === 0) market = await getMarket(true);
@@ -577,7 +582,7 @@ async function dealerTick(market) {
   }
   await answerOffers("silas", market);
   if (cache.at === 0) market = await getMarket(true);
-  for (const job of shipPlan(market.dealer, market.mainland, promisedBy(logs.listings, DEALER_ID, Date.now()))) {
+  for (const job of shipPlan(market.dealer, mainlandShare(market.mainland, !market.shop?.closed), promisedBy(logs.listings, DEALER_ID, Date.now()))) {
     const r = await tryCall("ship", dealerCall("ship", { token_id: job.token, qty: job.qty }));
     if (r) addNews(`Silas shipped ${lot(job.token, job.qty)} to the city for ${Math.round(job.pay)} coins.`);
   }
@@ -684,7 +689,7 @@ async function haggleApi(body) {
         if (market.stock[token] < qty) return reply(line("no_stock", { token }));
       } else {
         if (!RAW.includes(token)) return reply(line("wont_buy", { token }));
-        if (unitBid(market, token) <= 0) return reply(line("red_tide", { token }));
+        if (unitBid(market, token) <= 0) return reply(line(market.stock[token] >= TARGET[token] * OVERFLOW ? "overflowing" : "red_tide", { token }));
         if (pv.items[TOKENS.indexOf(token)] < qty) return reply(line("no_goods", { token }));
       }
       s = openHaggle(market, { side, token, qty, trades: pv.trades, mood: me.mood });
@@ -695,6 +700,8 @@ async function haggleApi(body) {
       if (side === "buy" && market.stock[token] < TARGET[token] * 0.5) kind = "open_buy_keen";
     }
     me.session = s;
+    // she (or he) takes only as many as fit: the rest of the lot stays with the player
+    const fewer = side === "buy" && s.qty < qty ? `I'll take ${s.qty} of them, no more: ${silas ? "my hold" : "my shelves"} can't fit the rest. ` : "";
     // the weather is the reason a player can see, so it comes first: a storm, else the tide
     let why;
     let weather = 1;
@@ -707,7 +714,7 @@ async function haggleApi(body) {
       weather = tideBidFactor(token, market.tide);
     }
     if (why && weather !== 1) kind = weather < 1 ? "open_buy_tide_cheap" : "open_buy_tide_dear";
-    return reply(await say(kind, { token, qty, price: s.counter, why }, "", who), { why: haggleWhy("open", { ...s, reputation: pv.reputation }, { trades: pv.trades, who }) });
+    return reply(fewer + (await say(kind, { token, qty: s.qty, price: s.counter, why }, "", who)), { why: haggleWhy("open", { ...s, reputation: pv.reputation }, { trades: pv.trades, who }) });
   }
 
   if (action === "say") {
@@ -912,6 +919,22 @@ async function route(req, res) {
         ceiling: market.ceiling, // (a tool on loan costs its ceiling plus interest)
         terms: TERMS,
         now: Date.now(), // so the browser's tide clock agrees with hers
+      });
+    }
+    // the live market, as the fast-forward (web/sim.html) starts from it
+    if (url.pathname === "/api/sim-seed") {
+      const m = await getMarket();
+      const d = m.dealer;
+      const pick = (o, keys) => Object.fromEntries(keys.map((k) => [k, o?.[k] ?? 0]));
+      return send(200, {
+        maren: { stock: m.stock, avgCost: m.avgCost, treasury: m.treasury },
+        policy: { floor: m.floor, ceiling: m.ceiling, exportPrice: m.exportPrice, windowLimit: m.windowLimit, windowMs: m.windowMs },
+        silas: d
+          ? { stock: pick(d.stock, DEALER_TOKENS), avgCost: pick(d.avgCost, DEALER_TOKENS), treasury: d.treasury, ceiling: pick(d.ceiling, DEALER_TOKENS), cityPrice: pick(d.cityPrice, DEALER_TOKENS), windowLimit: d.windowLimit, windowMs: d.windowMs }
+          : null,
+        mainland: m.mainland,
+        players: m.playerCount,
+        now: Date.now(),
       });
     }
     if (url.pathname === "/api/guest" && req.method === "POST") {

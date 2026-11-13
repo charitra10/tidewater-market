@@ -133,6 +133,10 @@ const LINES = {
     (c) => `My last lens is up for auction, love: ${c.top ? `${c.top} coins is the bid to beat` : `nobody's bid yet, and ${c.reserve} starts it`}. Bid on it in the stall, it closes in ${c.endsIn}.`,
     (c) => `That one's going to the highest bidder. ${c.top ? `It's at ${c.top} now` : `${c.reserve} opens the bidding`}; you've ${c.endsIn} left.`,
   ],
+  overflowing: [
+    (c) => `No more ${c.token}, love. Look at my shelves: I'm drowning in it. Come back once the mainland boat has taken some.`,
+    (c) => `I've more ${c.token} than I can sell or ship. Not today.`,
+  ],
   red_tide: [
     () => "Kelp? In a red tide? It's turned, love, every strand of it. Come back when the water's clear.",
     () => "Not a strand of kelp while the red tide's in. Nobody will touch it, not even the mainland.",

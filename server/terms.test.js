@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { TERMS, repLabel, repMood, haggleWhy } from "./merchant.js";
+import { TERMS, repLabel, repMood, haggleWhy } from "../web/merchant.js";
 
 const rust = fs.readFileSync(new URL("../contract/src/lib.rs", import.meta.url), "utf8");
 /// The value of `pub const NAME: type = <expr>;`, with `COIN` taken as 1 and `60 * 60 * 1000` worked out.
