@@ -2,7 +2,7 @@
 // Also knows where you can walk and where the interesting spots are.
 
 import { iconImage } from "./icons.js";
-import { TIDE_TEXT } from "./tide.js";
+import { TIDE_TEXT, STORM_TEXT } from "./tide.js";
 
 export const W = 1280;
 export const H = 720;
@@ -130,18 +130,19 @@ const PATHS = [
 ];
 
 // ---------- the pieces ----------
-function drawSea(ctx, t, wx) {
+function drawSea(ctx, t, wx, rough = 0) {
   const g = ctx.createLinearGradient(0, 0, 560, 0);
   g.addColorStop(0, "#1c5b78");
   g.addColorStop(1, "#3193a1");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, H);
   ctx.lineCap = "round";
-  for (let i = 0; i < 26; i++) {
-    const y = 18 + i * 28 + Math.sin(i * 2.1) * 8;
-    const x = ((i * 137 + t * (8 + (i % 4) * 3)) % 620) - 60;
+  // more and whiter wave crests in a storm
+  for (let i = 0; i < 26 + Math.round(rough * 30); i++) {
+    const y = ((18 + i * 28 + Math.sin(i * 2.1) * 8) % 740) + (i >= 26 ? 9 : 0);
+    const x = ((i * 137 + t * (8 + (i % 4) * 3) * (1 + rough * 1.5)) % 620) - 60;
     if (x > shoreX(y) + wx - 24) continue;
-    ctx.strokeStyle = `rgba(220,245,245,${0.1 + 0.1 * Math.sin(t * 0.9 + i)})`;
+    ctx.strokeStyle = `rgba(220,245,245,${0.1 + 0.1 * Math.sin(t * 0.9 + i) + 0.4 * rough})`;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(x, y);
@@ -269,6 +270,45 @@ function drawLand(ctx, t, wx) {
       ctx.moveTo(f.x + 4, f.y);
       ctx.lineTo(f.x + 3, f.y - 6);
       ctx.stroke();
+    }
+  }
+}
+
+// ---------- storms ----------
+const RAIN = Array.from({ length: 170 }, (_, i) => ({ x: (i * 397) % W, y: (i * 211) % H, speed: 520 + ((i * 53) % 260), len: 10 + (i % 7) * 2 }));
+const CLOUDS = [[80, 26, 1.2], [380, 8, 1], [640, 34, 1.3], [920, 12, 1.1], [1180, 30, 1]];
+
+/// The sky closes in, cloud drifts over, rain, and now and then lightning.
+/// `level` is 0 (calm) .. 1 (the storm at full blow).
+function drawStorm(ctx, t, level) {
+  if (level <= 0) return;
+  ctx.fillStyle = `rgba(24,32,48,${0.36 * level})`;
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 0.6 * level;
+  for (const [x0, y, s] of CLOUDS) {
+    const x = ((x0 + t * 16 * s) % (W + 320)) - 160;
+    ellipse(ctx, x - 70 * s, y + 14, 80 * s, 24 * s, "#434b5b");
+    ellipse(ctx, x + 60 * s, y + 12, 90 * s, 28 * s, "#545c6d");
+    ellipse(ctx, x, y, 120 * s, 34 * s, "#4a5263");
+  }
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = `rgba(200,215,235,${0.5 * level})`;
+  ctx.lineWidth = 1.3;
+  ctx.beginPath();
+  for (let i = 0; i < Math.round(RAIN.length * level); i++) {
+    const r = RAIN[i];
+    const y = ((r.y + t * r.speed) % (H + 40)) - 20;
+    const x = ((r.x + t * r.speed * 0.28) % (W + 40)) - 20;
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - r.len * 0.28, y - r.len);
+  }
+  ctx.stroke();
+  if (level > 0.85) {
+    const k = (t % 7.3) / 7.3; // a double flash about every seven seconds
+    const flash = k < 0.012 ? 0.5 : k > 0.03 && k < 0.04 ? 0.28 : 0;
+    if (flash) {
+      ctx.fillStyle = `rgba(240,245,255,${flash})`;
+      ctx.fillRect(0, 0, W, H);
     }
   }
 }
@@ -844,7 +884,8 @@ export function drawWorld(ctx, t, S) {
   ctx.clearRect(0, 0, W, H);
   const lvl = S.tide?.height ?? 0; // -1 low water .. 1 high water (spring tides go further)
   const wx = -8 + 14 * lvl; // where the water's edge sits, from the shoreline
-  drawSea(ctx, t, wx);
+  const rough = S.storm?.level ?? 0;
+  drawSea(ctx, t, wx, rough);
   drawReef(ctx, t, lvl);
   drawLand(ctx, t, wx);
   drawWashedUp(ctx, lvl);
@@ -888,7 +929,8 @@ export function drawWorld(ctx, t, S) {
     ellipse(ctx, bx - 4, by - 19, 11, 3.5, "#e6c36a");
   }
 
-  drawGulls(ctx, t);
+  drawStorm(ctx, t, rough);
+  if (rough < 0.4) drawGulls(ctx, t); // the gulls shelter from the storm
   drawNight(ctx, t, S.nightAmount);
 
   // things floating up: "+2 kelp"
@@ -932,8 +974,9 @@ export function drawWorld(ctx, t, S) {
   } else if (S.near && !S.shopOpen && !S.boardOpen) {
     const h = HOTSPOTS.find((s) => s.id === S.near);
     let sub = h.cost ? `${h.cost} energy` : "";
-    const tidal = (h.id === "shore" || h.id === "reef") && S.tide ? TIDE_TEXT[S.tide.phase][h.id] : "";
-    if (tidal) sub += ` · ${tidal}`;
+    const outdoors = h.id === "shore" || h.id === "reef" || h.id === "cliffs";
+    const weather = !outdoors ? "" : S.storm?.active ? STORM_TEXT[h.id] : h.id !== "cliffs" && S.tide ? TIDE_TEXT[S.tide.phase][h.id] : "";
+    if (weather) sub += ` · ${weather}`;
     pill(ctx, h.x, h.y - (h.pillUp ?? 62), h.verb, sub);
   }
 }

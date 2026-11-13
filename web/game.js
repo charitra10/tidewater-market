@@ -7,7 +7,7 @@
 import { Near, loadKey, generateKey, actions, TGAS, yoctoToCoins, coinsToYocto } from "./near-lite.js";
 import { TOKENS, NAMES, BLURB, ICONS } from "./icons.js";
 import { W, H, HOTSPOTS, BOARD_BOX, walkable, drawWorld } from "./world.js";
-import { tideAt, tideHeight, tideBidFactor, nextTide, tideName, TIDE_TEXT, TIDE_PERIOD_MS } from "./tide.js";
+import { tideAt, tideHeight, tideBidFactor, nextTide, tideName, TIDE_TEXT, TIDE_PERIOD_MS, stormAt, stormLevel, stormBidFactor, STORM_TEXT } from "./tide.js";
 
 const $ = (id) => document.getElementById(id);
 const RESERVE = 10n ** 23n; // 0.1 NEAR kept back for network fees, not shown as coins
@@ -31,6 +31,7 @@ const S = {
   nightAmount: 0,
   market: null,
   tide: tideAt(Date.now()), // { phase, spring, endsMs, height }, see tide.js
+  storm: { ...stormAt(Date.now()), level: 0 }, // { active, startMs, endsMs, level 0..1 }
 };
 let clockSkew = 0; // the shop's clock minus ours, so our tide agrees with Maren's
 const nowMs = () => Date.now() + clockSkew;
@@ -182,6 +183,13 @@ const TIDE_NEWS = {
   springhigh: "Spring high tide! Driftwood all along the beach, and the reef deeper than ever.",
 };
 let lastTide = null;
+let lastStorm = null;
+let warnedFor = 0; // the storm we have already warned about
+const STORM_NEWS = {
+  warn: "Storm clouds on the horizon: a storm in 3 minutes. Row out to the reef now, or wait it out.",
+  start: "A storm is blowing in! The reef is too rough to row to, but the shore is covered in wrack.",
+  end: "The storm has blown over. The reef is calm again, and the mainland boat can sail.",
+};
 
 /// A little chart of the water: two minutes back, ten ahead.
 function tideChart(now) {
@@ -204,8 +212,19 @@ function tideChart(now) {
       labels += `<text x="${lx.toFixed(1)}" y="${(phase === "low" ? y(lvl) - 4 : y(lvl) + 11).toFixed(1)}" text-anchor="middle" font-size="8.5" fill="#6b6357">${text}</text>`;
     }
   }
+  let storms = "";
+  for (let ms = from, seen = new Set(); ms < from + span; ms += 60_000) {
+    const s = stormAt(ms);
+    if (seen.has(s.startMs) || s.startMs > from + span) continue;
+    seen.add(s.startMs);
+    const x1 = Math.max(0, x(s.startMs));
+    const x2 = Math.min(w, x(s.endsMs));
+    if (x2 <= 0 || x1 >= w) continue;
+    storms += `<rect x="${x1.toFixed(1)}" y="0" width="${(x2 - x1).toFixed(1)}" height="${h}" fill="rgba(52,58,74,.32)"/>`;
+    if (x2 - x1 > 24) storms += `<text x="${((x1 + x2) / 2).toFixed(1)}" y="10" text-anchor="middle" font-size="8.5" font-weight="700" fill="#343a4a">storm</text>`;
+  }
   const nx = x(now).toFixed(1);
-  return `<path d="${line}L${w} ${h}L0 ${h}Z" fill="rgba(49,147,161,.3)"/><path d="${line}" fill="none" stroke="#2a8191" stroke-width="1.6"/>${labels}` +
+  return `${storms}<path d="${line}L${w} ${h}L0 ${h}Z" fill="rgba(49,147,161,.3)"/><path d="${line}" fill="none" stroke="#2a8191" stroke-width="1.6"/>${labels}` +
     `<line x1="${nx}" x2="${nx}" y1="0" y2="${h}" stroke="#b8432f" stroke-width="1" stroke-dasharray="2 2"/><circle cx="${nx}" cy="${y(tideHeight(now)).toFixed(1)}" r="3.2" fill="#b8432f" stroke="#fff" stroke-width="1.2"/>`;
 }
 
@@ -224,12 +243,36 @@ function renderTide() {
   let what = TIDE_TEXT[t.phase].what;
   if (t.phase === "falling" && tideAt(nextTide(now, "low")).spring) what = "Spring low tide next: kelp everywhere, the reef half out of the sea";
   if (t.phase === "rising" && tideAt(nextTide(now, "high")).spring) what = "Spring high tide next: driftwood all along the beach";
+  let price = TIDE_TEXT[t.phase].price + ".";
+  const storm = stormAt(now);
+  S.storm = { ...storm, level: S.storm.level };
+  card.classList.toggle("storm", storm.active);
+  if (storm.active) card.classList.remove("spring");
+  if (storm.active) {
+    $("tide-name").textContent = "Storm";
+    $("tide-when").textContent = `passes in ${mmss(storm.endsMs - now)}`;
+    what = STORM_TEXT.what;
+    price = STORM_TEXT.price + ".";
+  }
+  const soon = !storm.active && storm.startMs - now < 10 * 60_000;
+  $("tide-storm").hidden = !soon;
+  if (soon) $("tide-storm").textContent = `Storm in ${mmss(storm.startMs - now)}: the reef will close`;
   $("tide-what").textContent = what;
-  $("tide-price").textContent = TIDE_TEXT[t.phase].price + ".";
+  $("tide-price").textContent = price;
   $("tide-chart").innerHTML = tideChart(now);
 
+  // the weather news
+  if (started && lastStorm) {
+    if (!lastStorm.active && storm.active) toast(STORM_NEWS.start, false, 7000);
+    else if (lastStorm.active && !storm.active) toast(STORM_NEWS.end, false, 7000);
+    else if (!storm.active && storm.startMs - now <= 180_000 && warnedFor !== storm.startMs) toast(STORM_NEWS.warn, false, 7000);
+    if (lastStorm.active !== storm.active && S.shopOpen) renderShop();
+  }
+  if (!storm.active && storm.startMs - now <= 180_000) warnedFor = storm.startMs; // (no warning for a storm already upon you)
+  lastStorm = storm;
+
   // say so when the water turns (but not for the tide you arrived on)
-  if (lastTide && started && lastTide.phase !== t.phase && (t.phase === "low" || t.phase === "high")) {
+  if (lastTide && started && lastTide.phase !== t.phase && (t.phase === "low" || t.phase === "high") && !storm.active) {
     toast(TIDE_NEWS[(t.spring ? "spring" : "") + t.phase], false, 7000); // longer news, longer toast
     card.classList.remove("turn");
     void card.offsetWidth;
@@ -239,11 +282,12 @@ function renderTide() {
   lastTide = t;
 }
 
-/// For the stall: how the tide is moving her offer for a raw good.
+/// For the stall: how the weather is moving her offer for a raw good.
 function tideNote(token) {
-  const f = tideBidFactor(token, S.tide);
+  const s = stormBidFactor(token, S.storm);
+  const f = s * tideBidFactor(token, S.tide);
   if (f === 1) return "";
-  return ` <span class="tide-note ${f > 1 ? "up" : "down"}">${tideName(S.tide)}: she pays ${f > 1 ? "more" : "less"}</span>`;
+  return ` <span class="tide-note ${f > 1 ? "up" : "down"}">${s !== 1 ? "Storm" : tideName(S.tide)}: she pays ${f > 1 ? "more" : "less"}</span>`;
 }
 
 const clock = (ms) => `${Math.floor(ms / 60000)}m ${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}s`;
@@ -438,6 +482,9 @@ async function forage(h) {
   if (h.tool && pv.items[idx(h.tool)] === 0) {
     return toast(h.tool === "pickaxe" ? "The rock is too hard for bare hands. Maren sells pickaxes." : "The reef is too far to swim. You'd need a boat.", true);
   }
+  if (h.id === "reef" && stormAt(nowMs()).active) {
+    return toast(`The sea is far too rough to row out. The storm passes in ${mmss(stormAt(nowMs()).endsMs - nowMs())}.`, true);
+  }
   if (energyNow().e < h.cost) return toast("You're worn out. Catch your breath for a moment.", true);
   busy = true;
   S.busyText = BUSY_TEXT[h.id];
@@ -539,7 +586,14 @@ function openShop() {
   $("shop").hidden = false;
   $("stamp").hidden = true;
   session = null;
-  sayBubble(pv.trades >= 5 ? "Back again! My ledger likes you. What do you need?" : pv.trades > 0 ? "Tide's in and so am I. What'll it be?" : "A new face! I buy what the sea leaves behind, and I sell what you'll need to get more of it.");
+  const weather = S.storm.active
+    ? "Get in out of the rain! What'll it be?"
+    : S.tide.phase === "low"
+      ? "Tide's out, so half the village is in the rock pools. What'll it be?"
+      : S.tide.phase === "high"
+        ? "Tide's in and so am I. What'll it be?"
+        : "Tide or no tide, the stall's open. What'll it be?";
+  sayBubble(pv.trades >= 5 ? "Back again! My ledger likes you. What do you need?" : pv.trades > 0 ? weather : "A new face! I buy what the sea leaves behind, and I sell what you'll need to get more of it.");
   tab = SLOTS.slice(0, 4).some((t) => pv.items[idx(t)] > 0) ? "sell" : "buy";
   renderShop();
   refresh();
@@ -1046,6 +1100,7 @@ function frame(now) {
   const t = now / 1000;
   const p = S.player;
   S.tide.height = tideHeight(nowMs());
+  S.storm.level = stormLevel(nowMs());
 
   if (started && !busy && !S.shopOpen && !S.boardOpen) {
     let dx = (keys.has("d") || keys.has("arrowright") ? 1 : 0) - (keys.has("a") || keys.has("arrowleft") ? 1 : 0);

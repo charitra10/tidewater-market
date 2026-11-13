@@ -66,6 +66,9 @@
   #tide-chart { display: block; width: 100%; height: 38px; margin: 6px 0 5px; border-radius: 6px; background: #efe5cc; }
   #tide-what { font-size: 12.5px; line-height: 1.35; }
   #tide-price { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+  #tide.storm { background: #e3e1dc; }
+  #tide.storm #tide-name::after { content: "reef closed"; margin-left: 7px; padding: 1px 6px; border-radius: 8px; background: #343a4a; color: #fff; font-size: 10.5px; font-weight: 600; vertical-align: 2px; }
+  #tide-storm { margin-top: 4px; font-size: 12px; font-weight: 600; color: #94392a; }
   #tide.spring #tide-name::after { content: "spring"; margin-left: 7px; padding: 1px 6px; border-radius: 8px; background: var(--teal); color: #fff; font-size: 10.5px; font-weight: 600; vertical-align: 2px; }
   #tide.turn { animation: tick-new 2.4s ease-out; }
   #tide-table { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 7px; font-size: 12px; display: grid; grid-template-columns: auto 1fr; gap: 5px 9px; }
@@ -193,6 +196,7 @@
     #ticker { top: 122px; }
     #tide { top: 166px; left: 14px; right: auto; width: auto; padding: 6px 10px; }
     #tide-chart, #tide-what, #tide-price { display: none; }
+    #tide-storm { margin-top: 2px; }
     .slot { width: 36px; height: 36px; } .slot svg { width: 24px; height: 24px; }
   }
 </style>
@@ -217,11 +221,13 @@
   <svg id="tide-chart" viewBox="0 0 240 38" preserveAspectRatio="none" aria-hidden="true"></svg>
   <div id="tide-what"></div>
   <div id="tide-price"></div>
+  <div id="tide-storm" hidden></div>
   <div id="tide-table" hidden>
     <b>Low tide</b><span>Shore: 2–4 kelp, little driftwood. Reef: 1–2 pearls. Maren pays less for kelp and pearls, more for driftwood.</span>
     <b>High tide</b><span>Shore: 1–3 driftwood, 1–2 kelp. Reef: 0–1 pearls. Maren pays more for kelp and pearls, less for driftwood.</span>
     <b>In between</b><span>Shore: 1–3 kelp, 0–2 driftwood. Reef: 0–2 pearls. Ordinary prices.</span>
     <b>Spring tide</b><span>Every third tide the lows go lower and the highs higher: all of the above, more so.</span>
+    <b>Storm</b><span>One every half hour, 4 minutes long, forecast here. The reef is too rough to row to, the shore gives 2–5 driftwood and now and then a pearl, pickaxes break twice as often, and the mainland boat stays in harbour. Maren pays more for pearls, less for driftwood.</span>
     <p>The cliffs stand above the tide. Gather when the tide gives; sell when it takes.</p>
   </div>
 </div>
