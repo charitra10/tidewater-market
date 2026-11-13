@@ -80,7 +80,7 @@ call restock "{\"token_id\":\"kelp\",\"qty\":3,\"unit_cost\":\"$(coin 3)\"}" '1 
 step "Giving Maren a key that can ONLY quote, craft, export and trade on the notice board"
 KEYS=$(node scripts/keygen.mjs); MERCHANT_SK=${KEYS%% *}; MERCHANT_PK=${KEYS##* }
 run near account add-key "$MERCHANT" grant-function-call-access \
-  --allowance '0.4 NEAR' --contract-account-id "$MARKET" --function-names 'post_quote,cancel_quote,craft,export,shop_buy_listing,shop_list_item,cancel_listing' \
+  --allowance '0.4 NEAR' --contract-account-id "$MARKET" --function-names 'post_quote,cancel_quote,craft,export,shop_buy_listing,shop_list_item,cancel_listing,note_insult,call_in_loan' \
   use-manually-provided-public-key "$MERCHANT_PK" $SIGN
 
 umask 077

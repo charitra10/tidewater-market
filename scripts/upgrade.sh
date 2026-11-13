@@ -26,13 +26,13 @@ get() { grep -E "^$1=" server/.env | head -1 | cut -d= -f2-; }
 MARKET=$(get CONTRACT)
 MERCHANT=$(get MERCHANT_ID)
 WASM="contract/res/tidewater_market.wasm"
-METHODS="post_quote,cancel_quote,craft,export,shop_buy_listing,shop_list_item,cancel_listing"
+METHODS="post_quote,cancel_quote,craft,export,shop_buy_listing,shop_list_item,cancel_listing,note_insult,call_in_loan"
 NET="network-config testnet"
 SIGN="$NET sign-with-legacy-keychain send"
 
 # Asks the chain (read-only) whether the market's state is the current layout
-# (get_market reports dealer_id), and whether Maren's current key may call the
-# newest of her methods (shop_list_item: pinning notices for Silas). The key goes in
+# (get_market reports shop: investors, loans, storm cover and reputation), and
+# whether Maren's current key may call the newest of her methods (call_in_loan). The key goes in
 # through the environment, never the command line.
 STATE=$(MERCHANT_KEY="$(get MERCHANT_KEY)" node --input-type=module -e '
   import { Near, loadKey } from "./web/near-lite.js";
@@ -43,9 +43,9 @@ STATE=$(MERCHANT_KEY="$(get MERCHANT_KEY)" node --input-type=module -e '
   let can = false;
   try {
     const ak = await near.rpc("query", { request_type: "view_access_key", finality: "final", account_id: merchant, public_key: key.publicKey });
-    can = (ak.permission.FunctionCall?.method_names ?? []).includes("shop_list_item");
+    can = (ak.permission.FunctionCall?.method_names ?? []).includes("call_in_loan");
   } catch {}
-  console.log(`${"dealer_id" in mv ? "current" : "old"} ${can ? "key-ok" : "key-old"}`);
+  console.log(`${"shop" in mv ? "current" : "old"} ${can ? "key-ok" : "key-old"}`);
 ' "$MARKET" "$MERCHANT" 2>>"$LOG")
 
 if [ "${STATE%% *}" = old ]; then
@@ -58,7 +58,7 @@ else
 fi
 
 if [ "${STATE##* }" = key-old ]; then
-  step "Giving Maren a key that can ONLY quote, craft, export and trade on the notice board"
+  step "Giving Maren a key that can ONLY quote, craft, export, trade on the notice board, note insults and call in loans"
   KEYS=$(node scripts/keygen.mjs); MERCHANT_SK=${KEYS%% *}; MERCHANT_PK=${KEYS##* }
   run near account add-key "$MERCHANT" grant-function-call-access \
     --allowance '0.4 NEAR' --contract-account-id "$MARKET" --function-names "$METHODS" \

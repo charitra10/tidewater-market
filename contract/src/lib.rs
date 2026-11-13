@@ -184,6 +184,39 @@ pub fn event_now(ms: u64) -> Option<usize> {
 /// rope and pickaxes (same recipes as Maren's). Boats and beacon lenses are her work.
 pub const PLAYER_CRAFT: [(usize, u32); 2] = [(ROPE, 1), (PICKAXE, 2)];
 
+/// One coin (0.001 NEAR) in yoctoNEAR.
+pub const COIN: u128 = 10u128.pow(21);
+/// A merchant whose treasury falls below this shuts up shop...
+pub const CLOSE_BELOW: u128 = 150 * COIN;
+/// ...and opens again only once outside money brings it back up to this.
+pub const REOPEN_AT: u128 = 400 * COIN;
+/// Investing in a merchant: the smallest and largest stake, and how many IOUs
+/// a merchant may owe at once (storage is paid by the contract).
+pub const MIN_INVEST: u128 = 20 * COIN;
+pub const MAX_INVEST: u128 = 500 * COIN;
+pub const MAX_IOUS: usize = 20;
+/// An IOU is worth this much of what was put in (percent)...
+pub const IOU_RETURN_PCT: u128 = 120;
+/// ...repaid out of this share of the merchant's margin on every sale (percent).
+pub const REPAY_PCT: u128 = 30;
+/// Merchants, for the methods that name one.
+pub const MAREN: usize = 0;
+pub const SILAS: usize = 1;
+/// Loans of tools: interest on the tool's price (its price ceiling), the term,
+/// the share of the borrower's takings withheld until it is paid, and how many
+/// loans Maren may have out at once.
+pub const LOAN_INTEREST_PCT: u128 = 10;
+pub const LOAN_TERM_MS: u64 = 2 * 60 * 60 * 1000;
+pub const LOAN_WITHHOLD_PCT: u128 = 50;
+pub const MAX_LOANS: usize = 10;
+/// Storm cover on a pickaxe, sold by Maren: the premium, what she pays if it
+/// breaks in the covered storm, and how many covers she sells for one storm.
+pub const COVER_PREMIUM: u128 = 15 * COIN;
+pub const COVER_PAYOUT: u128 = 45 * COIN;
+pub const MAX_COVERS_PER_STORM: u32 = 20;
+/// Reputation: how often Maren may note an insult from the same player.
+pub const INSULT_GAP_MS: u64 = 60 * 1000;
+
 pub const MAX_TRADES: usize = 40;
 pub const MAX_BLOCKED: usize = 30;
 pub const MAX_KEEPERS: usize = 50;
@@ -206,6 +239,10 @@ enum StorageKey {
     Players,
     Quotes,
     DealerQuotes,
+    Credit,
+    Reputation,
+    Loans,
+    Covers,
 }
 
 /// Which way a deal goes, from the merchant's side of the counter.
@@ -329,6 +366,102 @@ pub struct DealerPolicy {
     pub window_sec: u64,
 }
 
+/// An investor's stake in a merchant: repaid, oldest first, out of the
+/// merchant's margins, up to `owed` (more than was put in).
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Iou {
+    pub id: u64,
+    pub investor: AccountId,
+    pub put_in: NearToken,
+    pub owed: NearToken,
+    pub repaid: NearToken,
+    pub at_ms: u64,
+}
+
+/// Whether a merchant is trading, and what they owe their investors.
+#[near(serializers = [borsh])]
+#[derive(Clone, Default)]
+pub struct Shop {
+    closed: bool,
+    closed_at_ms: u64,
+    closures: u32,
+    ious: Vec<Iou>,
+    invested: u128,
+    repaid: u128,
+}
+
+#[near(serializers = [json])]
+pub struct ShopView {
+    pub closed: bool,
+    pub closed_at_ms: u64,
+    /// How many times this merchant has had to shut up shop.
+    pub closures: u32,
+    /// Still owed to investors, over all open IOUs.
+    pub outstanding: NearToken,
+    pub invested: NearToken,
+    pub repaid: NearToken,
+    pub iou_count: u32,
+}
+
+/// A player's name in the village, from what the contract has seen them do.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Reputation {
+    /// Deals done with either merchant.
+    pub deals: u32,
+    /// Quotes the ledger refused because they broke a floor or a ceiling: tricks.
+    pub tricks: u32,
+    /// Insults Maren noted while haggling.
+    pub insults: u32,
+    pub last_insult_ms: u64,
+    /// NEAR invested in the merchants.
+    pub invested: NearToken,
+    pub loans_repaid: u32,
+    pub defaults: u32,
+}
+
+impl Reputation {
+    /// The score: dealings and investment raise it, tricks, insults and
+    /// defaults lower it. Clamped to -30..=60.
+    pub fn score(&self) -> i32 {
+        let deals = self.deals.min(20) as i32;
+        let invested = (self.invested.as_yoctonear() / (20 * COIN)).min(20) as i32;
+        let raw = deals + invested + 5 * self.loans_repaid as i32 - 3 * self.tricks as i32 - 2 * self.insults as i32 - 10 * self.defaults as i32;
+        raw.clamp(-30, 60)
+    }
+}
+
+/// A tool Maren has lent a player.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loan {
+    pub player: AccountId,
+    pub token_id: String,
+    /// What the tool cost her (it left her shelf at this cost).
+    pub cost: NearToken,
+    pub owed: NearToken,
+    pub repaid: NearToken,
+    pub lent_ms: u64,
+    pub due_ms: u64,
+}
+
+/// Storm cover on a player's pickaxe, for one storm.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cover {
+    pub storm_starts_ms: u64,
+    pub paid_out: bool,
+}
+
+#[near(serializers = [json])]
+pub struct InsuranceView {
+    pub premiums: NearToken,
+    pub payouts: NearToken,
+    pub covers_sold: u32,
+    pub claims_paid: u32,
+}
+
 /// A second merchant: a dealer who only buys (ore and pearls) and ships what
 /// he buys to his buyers in the city. His own account, treasury and books;
 /// the same kind of guard rails as Maren.
@@ -366,6 +499,8 @@ pub struct DealerView {
     pub window_resets_at_ms: u64,
     pub trade_count: u64,
     pub blocked_count: u64,
+    /// Open or shut, and what he owes his investors.
+    pub shop: ShopView,
 }
 
 #[near(serializers = [borsh])]
@@ -396,6 +531,23 @@ pub struct PlayerView {
     pub lit_ms: u64,
     /// Items this player has pinned on the notice board, in `TOKENS` order.
     pub on_board: Vec<u32>,
+    /// Their name in the village (see `get_reputation`).
+    pub reputation: i32,
+    /// NEAR waiting for them to `collect`.
+    pub credit: NearToken,
+    pub loan: Option<Loan>,
+    pub cover: Option<Cover>,
+}
+
+#[near(serializers = [json])]
+pub struct ReputationView {
+    pub score: i32,
+    pub deals: u32,
+    pub tricks: u32,
+    pub insults: u32,
+    pub invested: NearToken,
+    pub loans_repaid: u32,
+    pub defaults: u32,
 }
 
 #[near(serializers = [json])]
@@ -430,6 +582,13 @@ pub struct MarketView {
     pub board_version: u64,
     /// The pearl and ore dealer, once he has come to town.
     pub dealer_id: Option<AccountId>,
+    /// Open or shut, and what she owes her investors.
+    pub shop: ShopView,
+    /// Her storm-cover business.
+    pub insurance: InsuranceView,
+    pub loans_out: u32,
+    /// NEAR waiting for players to collect (IOU repayments, cover payouts).
+    pub credit_total: NearToken,
 }
 
 #[near(serializers = [json])]
@@ -485,6 +644,8 @@ pub struct ForageResult {
     pub storm: bool,
     /// The event under way, if any ("fog", "red_tide", "shipwreck", "festival", "calm").
     pub event: Option<String>,
+    /// What Maren paid out (to collect) for a pickaxe broken in a covered storm.
+    pub cover_payout: Option<NearToken>,
 }
 
 #[near(serializers = [json])]
@@ -508,6 +669,59 @@ pub struct TideView {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Market {
+    owner_id: AccountId,
+    merchant_id: AccountId,
+    frozen: bool,
+    policy: Policy,
+    energy_max: u32,
+    energy_regen_ms: u64,
+    players: LookupMap<AccountId, Player>,
+    player_count: u32,
+    quotes: LookupMap<AccountId, Quote>,
+    stock: [u32; N],
+    /// Total cost of the stock on the shelves (average-cost accounting).
+    cost: [u128; N],
+    supply: [u64; N],
+    treasury: u128,
+    profit: i128,
+    total_sales: u128,
+    total_purchases: u128,
+    mainland_fund: u128,
+    total_exports: u128,
+    window_start_ms: u64,
+    bought_in_window: u128,
+    next_id: u64,
+    trade_count: u64,
+    blocked_count: u64,
+    trades: Vec<Trade>,
+    blocked: Vec<Blocked>,
+    keepers: Vec<Keeper>,
+    listings: Vec<Listing>,
+    board_sales: Vec<BoardSale>,
+    board_sale_count: u64,
+    board_version: u64,
+    dealer: Option<Dealer>,
+    dealer_quotes: LookupMap<AccountId, Quote>,
+    /// Maren's and Silas's shops (`MAREN`, `SILAS`): open or shut, and their IOUs.
+    shops: Vec<Shop>,
+    /// NEAR waiting for each investor (or insured player) to collect.
+    credit: LookupMap<AccountId, u128>,
+    credit_total: u128,
+    reputation: LookupMap<AccountId, Reputation>,
+    loans: LookupMap<AccountId, Loan>,
+    loan_list: Vec<AccountId>,
+    covers: LookupMap<AccountId, Cover>,
+    /// (storm start, covers sold for it)
+    cover_tally: (u64, u32),
+    premiums: u128,
+    payouts: u128,
+    covers_sold: u32,
+    claims_paid: u32,
+}
+
+/// The state layout with the dealer, before investors, loans, cover and reputation (v3), read once by `migrate`.
+#[near(serializers = [borsh])]
+pub struct MarketV3 {
     owner_id: AccountId,
     merchant_id: AccountId,
     frozen: bool,
@@ -724,22 +938,38 @@ impl Market {
             board_version: 0,
             dealer: None,
             dealer_quotes: LookupMap::new(StorageKey::DealerQuotes),
+            shops: vec![Shop::default(), Shop::default()],
+            credit: LookupMap::new(StorageKey::Credit),
+            credit_total: 0,
+            reputation: LookupMap::new(StorageKey::Reputation),
+            loans: LookupMap::new(StorageKey::Loans),
+            loan_list: Vec::new(),
+            covers: LookupMap::new(StorageKey::Covers),
+            cover_tally: (0, 0),
+            premiums: 0,
+            payouts: 0,
+            covers_sold: 0,
+            claims_paid: 0,
         }
     }
 
-    /// Upgrade from an older state layout: v2 (before the dealer) or v1 (before
-    /// the notice board). Keeps every player, item, trade, keeper and notice.
+    /// Upgrade from an older state layout: v3 (before investors, loans, storm
+    /// cover and reputation), v2 (before the dealer) or v1 (before the notice
+    /// board). Keeps every player, item, trade, keeper, notice and the dealer.
     /// Only the contract account itself can call it, in the same transaction
     /// that deploys the new code.
     #[private]
     #[init(ignore_state)]
     pub fn migrate() -> Self {
         let raw = env::storage_read(b"STATE").unwrap_or_else(|| env::panic_str("No state to migrate"));
+        if let Ok(old) = MarketV3::try_from_slice(&raw) {
+            return Self::from_v3(old);
+        }
         if let Ok(old) = MarketV2::try_from_slice(&raw) {
-            return Self::from_v2(old);
+            return Self::from_v3(Self::v2_to_v3(old));
         }
         let old = MarketV1::try_from_slice(&raw).unwrap_or_else(|_| env::panic_str("Cannot deserialize the old state: is it already upgraded?"));
-        Self::from_v2(MarketV2 {
+        Self::from_v3(Self::v2_to_v3(MarketV2 {
             owner_id: old.owner_id,
             merchant_id: old.merchant_id,
             frozen: old.frozen,
@@ -770,11 +1000,11 @@ impl Market {
             board_sales: Vec::new(),
             board_sale_count: 0,
             board_version: 0,
-        })
+        }))
     }
 
-    fn from_v2(old: MarketV2) -> Self {
-        Self {
+    fn v2_to_v3(old: MarketV2) -> MarketV3 {
+        MarketV3 {
             owner_id: old.owner_id,
             merchant_id: old.merchant_id,
             frozen: old.frozen,
@@ -807,6 +1037,55 @@ impl Market {
             board_version: old.board_version,
             dealer: None,
             dealer_quotes: LookupMap::new(StorageKey::DealerQuotes),
+        }
+    }
+
+    fn from_v3(old: MarketV3) -> Self {
+        Self {
+            owner_id: old.owner_id,
+            merchant_id: old.merchant_id,
+            frozen: old.frozen,
+            policy: old.policy,
+            energy_max: old.energy_max,
+            energy_regen_ms: old.energy_regen_ms,
+            players: old.players,
+            player_count: old.player_count,
+            quotes: old.quotes,
+            stock: old.stock,
+            cost: old.cost,
+            supply: old.supply,
+            treasury: old.treasury,
+            profit: old.profit,
+            total_sales: old.total_sales,
+            total_purchases: old.total_purchases,
+            mainland_fund: old.mainland_fund,
+            total_exports: old.total_exports,
+            window_start_ms: old.window_start_ms,
+            bought_in_window: old.bought_in_window,
+            next_id: old.next_id,
+            trade_count: old.trade_count,
+            blocked_count: old.blocked_count,
+            trades: old.trades,
+            blocked: old.blocked,
+            keepers: old.keepers,
+            listings: old.listings,
+            board_sales: old.board_sales,
+            board_sale_count: old.board_sale_count,
+            board_version: old.board_version,
+            dealer: old.dealer,
+            dealer_quotes: old.dealer_quotes,
+            shops: vec![Shop::default(), Shop::default()],
+            credit: LookupMap::new(StorageKey::Credit),
+            credit_total: 0,
+            reputation: LookupMap::new(StorageKey::Reputation),
+            loans: LookupMap::new(StorageKey::Loans),
+            loan_list: Vec::new(),
+            covers: LookupMap::new(StorageKey::Covers),
+            cover_tally: (0, 0),
+            premiums: 0,
+            payouts: 0,
+            covers_sold: 0,
+            claims_paid: 0,
         }
     }
 
@@ -929,6 +1208,24 @@ impl Market {
             self.supply[PICKAXE] -= 1;
             emit_mt("mt_burn", "owner_id", &id, None, &[(PICKAXE, 1)]);
         }
+        // storm cover: a pickaxe broken in the covered storm is paid for by Maren
+        let mut cover_payout = None;
+        if tool_broke && storm {
+            let (_, start, _) = storm_at(now);
+            if let Some(mut c) = self.covers.get(&id).cloned().filter(|c| c.storm_starts_ms == start && !c.paid_out) {
+                let pay = COVER_PAYOUT.min(self.treasury);
+                c.paid_out = true;
+                self.covers.insert(id.clone(), c);
+                self.treasury -= pay;
+                self.payouts += pay;
+                self.profit -= pay as i128;
+                self.claims_paid += 1;
+                self.add_credit(&id, pay);
+                emit_game("cover_paid", json!({ "player": id, "amount": NearToken::from_yoctonear(pay) }));
+                cover_payout = Some(NearToken::from_yoctonear(pay));
+                self.settle_shops();
+            }
+        }
         let energy_left = p.energy;
         self.players.insert(id.clone(), p);
         let tide = TIDE_PHASES[phase].to_string();
@@ -945,6 +1242,7 @@ impl Market {
             spring,
             storm,
             event: event.map(|e| EVENTS[e].to_string()),
+            cover_payout,
         }
     }
 
@@ -998,6 +1296,7 @@ impl Market {
         require!(q.id == id, "That quote was replaced by a newer one");
         let now = env::block_timestamp_ms();
         require!(now <= q.expires_ms, "That quote has expired");
+        require!(!self.shops[MAREN].closed, "Maren's stall is shut until someone invests in it");
         let mut p = self.player(&who);
         let t = token_index(&q.token_id);
         let total = q.total.as_yoctonear();
@@ -1012,6 +1311,7 @@ impl Market {
                 self.treasury += total;
                 self.total_sales += total;
                 self.profit += total as i128 - cost_out as i128;
+                self.earned(MAREN, total as i128 - cost_out as i128);
                 if paid > total {
                     Promise::new(who.clone()).transfer(NearToken::from_yoctonear(paid - total)).detach();
                 }
@@ -1038,7 +1338,11 @@ impl Market {
                 self.treasury -= total;
                 self.total_purchases += total;
                 self.bought_in_window += total;
-                Promise::new(who.clone()).transfer(q.total).detach();
+                // (half of it goes to their loan, if they owe Maren for a tool)
+                let kept = self.withhold_for_loan(&who, total);
+                if total > kept {
+                    Promise::new(who.clone()).transfer(NearToken::from_yoctonear(total - kept)).detach();
+                }
                 emit_mt(
                     "mt_transfer",
                     "old_owner_id",
@@ -1052,6 +1356,8 @@ impl Market {
         self.players.insert(who.clone(), p);
         self.quotes.remove(&who);
         self.trade_count += 1;
+        self.rep_mut(&who, |r| r.deals += 1);
+        self.settle_shops();
         let trade = Trade {
             id: q.id,
             player: who,
@@ -1170,6 +1476,11 @@ impl Market {
         let paid = env::attached_deposit().as_yoctonear();
         require!(paid >= total, "Attach the price");
         require!(self.party(&buyer) == Party::Player, "Merchants buy off the board with their own methods");
+        match self.party(&l.seller) {
+            Party::Shop => require!(!self.shops[MAREN].closed, "Maren's stall is shut until someone invests in it"),
+            Party::Dealer => require!(!self.shops[SILAS].closed, "Silas has gone to the city to raise money until someone invests in him"),
+            Party::Player => {}
+        }
         let mut b = self.player(&buyer);
         b.items[token_index(&l.token_id)] += qty;
         b.trades += 1;
@@ -1180,9 +1491,199 @@ impl Market {
         self.close_sale(i, &buyer, qty, total)
     }
 
+
+    // ------------------------------------------------------------------
+    // Investing in a merchant, loans of tools, storm cover (anyone who has joined)
+    // ------------------------------------------------------------------
+
+    /// Put NEAR into a merchant's treasury ("maren" or "silas") in return for
+    /// an IOU worth 120% of it, repaid oldest first out of 30% of the
+    /// merchant's margin on every sale. A merchant who has shut up shop opens
+    /// again once their treasury is back to 400 coins. If the merchant never
+    /// makes a profit, the IOU is never repaid: that is the risk.
+    #[payable]
+    pub fn invest(&mut self, merchant: String) -> Iou {
+        let who = env::predecessor_account_id();
+        require!(self.players.contains_key(&who), "Join the game first");
+        require!(self.party(&who) == Party::Player, "Merchants cannot invest in each other");
+        let s = self.merchant_index(&merchant);
+        let amount = env::attached_deposit().as_yoctonear();
+        require!(amount >= MIN_INVEST, "The smallest stake is 20 coins");
+        require!(amount <= MAX_INVEST, "The largest stake is 500 coins");
+        require!(self.shops[s].ious.len() < MAX_IOUS, "That merchant already owes as many investors as the ledger allows");
+        *self.treasury_mut(s) += amount;
+        let iou = Iou {
+            id: self.next_id,
+            investor: who.clone(),
+            put_in: NearToken::from_yoctonear(amount),
+            owed: NearToken::from_yoctonear(amount * IOU_RETURN_PCT / 100),
+            repaid: NearToken::from_yoctonear(0),
+            at_ms: env::block_timestamp_ms(),
+        };
+        self.next_id += 1;
+        self.shops[s].ious.push(iou.clone());
+        self.shops[s].invested += amount;
+        self.rep_mut(&who, |r| r.invested = NearToken::from_yoctonear(r.invested.as_yoctonear() + amount));
+        emit_game("invest", json!({ "merchant": merchant, "iou": iou }));
+        self.settle_shops();
+        iou
+    }
+
+    /// Take the NEAR waiting for you: IOU repayments and storm-cover payouts.
+    pub fn collect(&mut self) -> NearToken {
+        let who = env::predecessor_account_id();
+        let amount = self.credit.get(&who).copied().unwrap_or(0);
+        require!(amount > 0, "There is nothing waiting for you");
+        self.credit.remove(&who);
+        self.credit_total -= amount;
+        let amount = NearToken::from_yoctonear(amount);
+        Promise::new(who.clone()).transfer(amount).detach();
+        emit_game("collect", json!({ "player": who, "amount": amount }));
+        amount
+    }
+
+    /// Borrow a pickaxe or a boat from Maren's shelf now, and owe her its
+    /// price ceiling plus 10% within two hours. Until it is paid, half of
+    /// whatever you earn from trading goes to the loan; you can also pay with
+    /// `repay_loan`. She lends only to players in good standing, one tool
+    /// each, and keeps her last one for sale. An unpaid loan is called in:
+    /// she takes the tool back, and the village remembers.
+    pub fn borrow(&mut self, token_id: String) -> Loan {
+        let who = env::predecessor_account_id();
+        let mut p = self.player(&who);
+        let t = token_index(&token_id);
+        require!(t == PICKAXE || t == BOAT, "Maren lends pickaxes and boats");
+        require!(!self.frozen && !self.shops[MAREN].closed, "Maren's stall is shut");
+        require!(self.loans.get(&who).is_none(), "You already owe Maren for a tool");
+        require!(self.loan_list.len() < MAX_LOANS, "Maren has lent out all she dares");
+        require!(self.rep_score(&who) >= 0, "Maren doesn't lend to people she doesn't trust");
+        let merchant = self.merchant_id.clone();
+        require!(self.stock[t] >= 2 + self.reserved(&merchant, t), "Maren keeps her last one for sale");
+        let cost_out = self.take_stock(t, 1);
+        p.items[t] += 1;
+        self.players.insert(who.clone(), p);
+        let now = env::block_timestamp_ms();
+        let loan = Loan {
+            player: who.clone(),
+            token_id,
+            cost: NearToken::from_yoctonear(cost_out),
+            owed: NearToken::from_yoctonear(self.policy.ceiling[t].as_yoctonear() * (100 + LOAN_INTEREST_PCT) / 100),
+            repaid: NearToken::from_yoctonear(0),
+            lent_ms: now,
+            due_ms: now + LOAN_TERM_MS,
+        };
+        self.loans.insert(who.clone(), loan.clone());
+        self.loan_list.push(who.clone());
+        emit_mt("mt_transfer", "old_owner_id", &merchant, Some(("new_owner_id", &who)), &[(t, 1)]);
+        emit_game("loan", json!(loan));
+        loan
+    }
+
+    /// Pay toward your loan. Any NEAR beyond what you owe is refunded.
+    /// Returns the loan, or nothing once it is paid off.
+    #[payable]
+    pub fn repay_loan(&mut self) -> Option<Loan> {
+        let who = env::predecessor_account_id();
+        let loan = self.loans.get(&who).cloned().unwrap_or_else(|| env::panic_str("You owe Maren nothing"));
+        let paid = env::attached_deposit().as_yoctonear();
+        require!(paid > 0, "Attach what you want to pay");
+        let x = paid.min(loan.owed.as_yoctonear() - loan.repaid.as_yoctonear());
+        if paid > x {
+            Promise::new(who.clone()).transfer(NearToken::from_yoctonear(paid - x)).detach();
+        }
+        self.apply_repayment(&who, loan, x);
+        self.settle_shops();
+        self.loans.get(&who).cloned()
+    }
+
+    /// Cover your pickaxe for the next storm: pay Maren 15 coins now, and if
+    /// it breaks on the cliffs in that storm she pays you 45 (to `collect`).
+    /// She sells only so much cover for one storm, and none once it blows.
+    #[payable]
+    pub fn insure(&mut self) -> Cover {
+        let who = env::predecessor_account_id();
+        let p = self.player(&who);
+        require!(p.items[PICKAXE] > 0, "You have no pickaxe to cover");
+        require!(!self.frozen && !self.shops[MAREN].closed, "Maren's stall is shut");
+        let (blowing, start, _) = storm_at(env::block_timestamp_ms());
+        require!(!blowing, "Too late: the storm is already here");
+        require!(
+            self.covers.get(&who).map_or(true, |c| c.storm_starts_ms != start),
+            "Your pickaxe is already covered for the next storm"
+        );
+        let paid = env::attached_deposit().as_yoctonear();
+        require!(paid >= COVER_PREMIUM, "Attach the premium: 15 coins");
+        if self.cover_tally.0 != start {
+            self.cover_tally = (start, 0);
+        }
+        require!(self.cover_tally.1 < MAX_COVERS_PER_STORM, "Maren has sold all the cover she dares for this storm");
+        if paid > COVER_PREMIUM {
+            Promise::new(who.clone()).transfer(NearToken::from_yoctonear(paid - COVER_PREMIUM)).detach();
+        }
+        self.cover_tally.1 += 1;
+        self.treasury += COVER_PREMIUM;
+        self.premiums += COVER_PREMIUM;
+        self.profit += COVER_PREMIUM as i128;
+        self.covers_sold += 1;
+        let cover = Cover { storm_starts_ms: start, paid_out: false };
+        self.covers.insert(who.clone(), cover.clone());
+        emit_game("insure", json!({ "player": who, "cover": cover }));
+        self.settle_shops();
+        cover
+    }
+
     // ------------------------------------------------------------------
     // Merchant (the NPC's own key may call only these)
     // ------------------------------------------------------------------
+
+    /// Note an insult a player made while haggling (at most one a minute per
+    /// player). It lowers their name in the village. Returns whether it counted.
+    pub fn note_insult(&mut self, player: AccountId) -> bool {
+        self.assert_merchant();
+        require!(self.players.contains_key(&player), "That account is not a player");
+        let now = env::block_timestamp_ms();
+        let mut r = self.reputation.get(&player).cloned().unwrap_or_default();
+        if r.insults > 0 && now < r.last_insult_ms + INSULT_GAP_MS {
+            return false;
+        }
+        r.insults += 1;
+        r.last_insult_ms = now;
+        self.reputation.insert(player.clone(), r);
+        emit_game("insult_noted", json!({ "player": player }));
+        true
+    }
+
+    /// Call in an overdue loan. If the borrower still has the tool she takes it
+    /// back (what they paid so far is hers); if not, she writes it off. Either
+    /// way the default is remembered.
+    pub fn call_in_loan(&mut self, player: AccountId) -> String {
+        self.assert_merchant();
+        let loan = self.loans.get(&player).cloned().unwrap_or_else(|| env::panic_str("That player owes nothing"));
+        require!(env::block_timestamp_ms() > loan.due_ms, "That loan is not due yet");
+        let t = token_index(&loan.token_id);
+        let repaid = loan.repaid.as_yoctonear();
+        let mut p = self.player(&player);
+        let outcome = if p.items[t] > 0 {
+            p.items[t] -= 1;
+            self.players.insert(player.clone(), p);
+            self.stock[t] += 1;
+            self.cost[t] += loan.cost.as_yoctonear();
+            self.profit += repaid as i128;
+            self.earned(MAREN, repaid as i128);
+            let merchant = self.merchant_id.clone();
+            emit_mt("mt_transfer", "old_owner_id", &player, Some(("new_owner_id", &merchant)), &[(t, 1)]);
+            "repossessed"
+        } else {
+            self.profit += repaid as i128 - loan.cost.as_yoctonear() as i128;
+            "written_off"
+        };
+        self.loans.remove(&player);
+        self.loan_list.retain(|a| *a != player);
+        self.rep_mut(&player, |r| r.defaults += 1);
+        emit_game("loan_called_in", json!({ "player": player, "outcome": outcome, "loan": loan }));
+        self.settle_shops();
+        outcome.to_string()
+    }
 
     /// Offer a deal to one player. A newer quote replaces the player's older
     /// one. A quote that breaks the guard rails is recorded and returned as
@@ -1204,6 +1705,9 @@ impl Market {
         let now = env::block_timestamp_ms();
 
         if let Some(reason) = self.check_quote(&side, t, qty, total.as_yoctonear()) {
+            if matches!(reason, "below_price_floor" | "above_price_ceiling") {
+                self.rep_mut(&player, |r| r.tricks += 1); // a deal no honest haggle could reach
+            }
             self.record_blocked(player, side, token_id, qty, total, reason);
             return QuoteResult {
                 status: "blocked".into(),
@@ -1248,6 +1752,7 @@ impl Market {
     pub fn craft(&mut self, token_id: String, times: u32) {
         self.assert_merchant();
         require!(!self.frozen, "The merchant is frozen");
+        require!(!self.shops[MAREN].closed, "Maren's stall is shut until someone invests in it");
         require!(times > 0 && times <= MAX_QTY, "Bad amount");
         let out = token_index(&token_id);
         let (_, inputs) = RECIPES
@@ -1284,12 +1789,14 @@ impl Market {
         require!(self.stock[t] >= qty + self.reserved(&self.merchant_id, t), "Those are promised on the notice board");
         let pay = price * qty as u128;
         require!(pay <= self.mainland_fund, "The mainland is out of coin");
+        require!(!self.shops[MAREN].closed, "Maren's stall is shut until someone invests in it");
         let cost_out = self.take_stock(t, qty);
         self.supply[t] -= qty as u64;
         self.mainland_fund -= pay;
         self.treasury += pay;
         self.total_exports += pay;
         self.profit += pay as i128 - cost_out as i128;
+        self.earned(MAREN, pay as i128 - cost_out as i128);
         emit_mt("mt_burn", "owner_id", &self.merchant_id, None, &[(t, qty)]);
         emit_game(
             "export",
@@ -1341,6 +1848,8 @@ impl Market {
         let t = token_index(&token_id);
         let reason = if self.frozen {
             Some("frozen")
+        } else if self.shops[MAREN].closed {
+            Some("shop_closed")
         } else if unit_price.as_yoctonear() < self.policy.floor[t].as_yoctonear() {
             Some("below_price_floor")
         } else {
@@ -1370,6 +1879,8 @@ impl Market {
         let avg = if d.stock[t] == 0 { 0 } else { d.cost[t] / d.stock[t] as u128 };
         let reason = if self.frozen {
             Some("frozen")
+        } else if self.shops[SILAS].closed {
+            Some("shop_closed")
         } else if unit_price.as_yoctonear() < avg {
             Some("below_cost")
         } else {
@@ -1434,6 +1945,9 @@ impl Market {
         require!(self.players.contains_key(&player), "That account is not a player");
         let now = env::block_timestamp_ms();
         if let Some(reason) = self.check_dealer_quote(t, qty, total.as_yoctonear()) {
+            if reason == "above_price_ceiling" {
+                self.rep_mut(&player, |r| r.tricks += 1);
+            }
             let blocked = Blocked { player, side: Side::Buy, token_id, qty, total, reason: reason.to_string(), timestamp_ms: now };
             let d = self.dealer.as_mut().unwrap();
             emit_game("dealer_quote_blocked", json!(blocked));
@@ -1469,6 +1983,7 @@ impl Market {
         self.assert_dealer();
         require!(!self.frozen, "The merchant is frozen");
         require!(!storm_at(env::block_timestamp_ms()).0, "The dealer's boat stays in harbour during a storm");
+        require!(!self.shops[SILAS].closed, "Silas has gone to the city to raise money until someone invests in him");
         let t = token_index(&token_id);
         let promised = self.reserved(&self.dealer.as_ref().unwrap().account_id.clone(), t);
         let d = self.dealer.as_mut().unwrap();
@@ -1483,6 +1998,7 @@ impl Market {
         d.total_shipped += pay;
         d.profit += pay as i128 - cost_out as i128;
         let dealer_id = d.account_id.clone();
+        self.earned(SILAS, pay as i128 - cost_out as i128);
         self.mainland_fund -= pay;
         self.supply[t] -= qty as u64;
         emit_mt("mt_burn", "owner_id", &dealer_id, None, &[(t, qty)]);
@@ -1531,6 +2047,7 @@ impl Market {
         require!(env::predecessor_account_id() == self.owner_id, "Owner only");
         let d = self.dealer.as_mut().unwrap_or_else(|| env::panic_str("There is no dealer in town yet"));
         d.treasury += env::attached_deposit().as_yoctonear();
+        self.settle_shops();
     }
 
     #[payable]
@@ -1539,6 +2056,7 @@ impl Market {
         let d = self.dealer.as_mut().unwrap_or_else(|| env::panic_str("There is no dealer in town yet"));
         require!(amount.as_yoctonear() <= d.treasury, "More than his treasury holds");
         d.treasury -= amount.as_yoctonear();
+        self.settle_shops();
         Promise::new(self.owner_id.clone()).transfer(amount)
     }
 
@@ -1575,6 +2093,7 @@ impl Market {
     pub fn fund_treasury(&mut self) {
         require!(env::predecessor_account_id() == self.owner_id, "Owner only");
         self.treasury += env::attached_deposit().as_yoctonear();
+        self.settle_shops();
     }
 
     /// Add NEAR to the mainland's purse (the attached deposit).
@@ -1589,6 +2108,7 @@ impl Market {
         self.assert_owner();
         require!(amount.as_yoctonear() <= self.treasury, "More than the treasury holds");
         self.treasury -= amount.as_yoctonear();
+        self.settle_shops();
         Promise::new(self.owner_id.clone()).transfer(amount)
     }
 
@@ -1726,6 +2246,15 @@ impl Market {
             board_sale_count: self.board_sale_count,
             board_version: self.board_version,
             dealer_id: self.dealer.as_ref().map(|d| d.account_id.clone()),
+            shop: self.shop_view(MAREN),
+            insurance: InsuranceView {
+                premiums: NearToken::from_yoctonear(self.premiums),
+                payouts: NearToken::from_yoctonear(self.payouts),
+                covers_sold: self.covers_sold,
+                claims_paid: self.claims_paid,
+            },
+            loans_out: self.loan_list.len() as u32,
+            credit_total: NearToken::from_yoctonear(self.credit_total),
         }
     }
 
@@ -1747,8 +2276,33 @@ impl Market {
                 window_resets_at_ms: if open { d.window_start_ms + d.policy.window_sec * 1000 } else { 0 },
                 trade_count: d.trade_count,
                 blocked_count: d.blocked_count,
+                shop: self.shop_view(SILAS),
             }
         })
+    }
+
+    /// A merchant's open IOUs ("maren" or "silas"), oldest (next to be repaid) first.
+    pub fn get_ious(&self, merchant: String) -> Vec<Iou> {
+        self.shops[self.merchant_index(&merchant)].ious.clone()
+    }
+
+    /// A player's name in the village, and what it is made of.
+    pub fn get_reputation(&self, account_id: AccountId) -> ReputationView {
+        let r = self.reputation.get(&account_id).cloned().unwrap_or_default();
+        ReputationView {
+            score: r.score(),
+            deals: r.deals,
+            tricks: r.tricks,
+            insults: r.insults,
+            invested: r.invested,
+            loans_repaid: r.loans_repaid,
+            defaults: r.defaults,
+        }
+    }
+
+    /// Every tool Maren has out on loan.
+    pub fn get_loans(&self) -> Vec<Loan> {
+        self.loan_list.iter().filter_map(|a| self.loans.get(a).cloned()).collect()
     }
 
     pub fn get_dealer_quote(&self, account_id: AccountId) -> Option<Quote> {
@@ -1891,6 +2445,9 @@ impl Market {
         if self.frozen {
             return Some("frozen");
         }
+        if self.shops[SILAS].closed {
+            return Some("shop_closed");
+        }
         if storm_at(now).0 {
             return Some("storm"); // his boat is battened down
         }
@@ -1917,6 +2474,7 @@ impl Market {
         let now = env::block_timestamp_ms();
         require!(now <= q.expires_ms, "That quote has expired");
         require!(env::attached_deposit().is_zero(), "Do not attach NEAR when selling to the dealer");
+        require!(!self.shops[SILAS].closed, "Silas has gone to the city to raise money until someone invests in him");
         let mut p = self.player(&who);
         let t = token_index(&q.token_id);
         let total = q.total.as_yoctonear();
@@ -1941,10 +2499,157 @@ impl Market {
         p.trades += 1;
         self.players.insert(who.clone(), p);
         self.dealer_quotes.remove(&who);
-        Promise::new(who.clone()).transfer(q.total).detach();
+        let kept = self.withhold_for_loan(&who, total);
+        if total > kept {
+            Promise::new(who.clone()).transfer(NearToken::from_yoctonear(total - kept)).detach();
+        }
+        self.rep_mut(&who, |r| r.deals += 1);
+        self.settle_shops();
         emit_mt("mt_transfer", "old_owner_id", &who, Some(("new_owner_id", &dealer_id)), &[(t, q.qty)]);
         emit_game("dealer_trade", json!(trade));
         trade
+    }
+
+
+    // ---------------- shops, investors, loans, reputation ----------------
+
+    fn merchant_index(&self, name: &str) -> usize {
+        match name {
+            "maren" => MAREN,
+            "silas" => {
+                require!(self.dealer.is_some(), "Silas is not in town");
+                SILAS
+            }
+            _ => env::panic_str("Name a merchant: maren or silas"),
+        }
+    }
+
+    fn treasury_of(&self, s: usize) -> u128 {
+        if s == MAREN {
+            self.treasury
+        } else {
+            self.dealer.as_ref().map_or(0, |d| d.treasury)
+        }
+    }
+
+    fn treasury_mut(&mut self, s: usize) -> &mut u128 {
+        if s == MAREN {
+            &mut self.treasury
+        } else {
+            &mut self.dealer.as_mut().unwrap_or_else(|| env::panic_str("Silas is not in town")).treasury
+        }
+    }
+
+    /// Shut a merchant's shop when the treasury falls below `CLOSE_BELOW`, and
+    /// open it again once it is back to `REOPEN_AT`.
+    fn settle_shops(&mut self) {
+        let now = env::block_timestamp_ms();
+        for s in [MAREN, SILAS] {
+            if s == SILAS && self.dealer.is_none() {
+                continue;
+            }
+            let t = self.treasury_of(s);
+            let shop = &mut self.shops[s];
+            let name = if s == MAREN { "maren" } else { "silas" };
+            if !shop.closed && t < CLOSE_BELOW {
+                shop.closed = true;
+                shop.closed_at_ms = now;
+                shop.closures += 1;
+                emit_game("shop_closed", json!({ "merchant": name, "treasury": NearToken::from_yoctonear(t) }));
+            } else if shop.closed && t >= REOPEN_AT {
+                shop.closed = false;
+                emit_game("shop_reopened", json!({ "merchant": name, "treasury": NearToken::from_yoctonear(t) }));
+            }
+        }
+    }
+
+    /// A merchant made `margin` on a sale: 30% of it repays their IOUs, oldest
+    /// first, into each investor's credit.
+    fn earned(&mut self, s: usize, margin: i128) {
+        if margin <= 0 || self.shops[s].ious.is_empty() {
+            return;
+        }
+        let mut pool = (margin as u128 * REPAY_PCT / 100).min(self.treasury_of(s));
+        let mut paid: Vec<(AccountId, u128)> = Vec::new();
+        for iou in self.shops[s].ious.iter_mut() {
+            if pool == 0 {
+                break;
+            }
+            let x = (iou.owed.as_yoctonear() - iou.repaid.as_yoctonear()).min(pool);
+            iou.repaid = NearToken::from_yoctonear(iou.repaid.as_yoctonear() + x);
+            pool -= x;
+            paid.push((iou.investor.clone(), x));
+        }
+        let total: u128 = paid.iter().map(|(_, x)| x).sum();
+        *self.treasury_mut(s) -= total;
+        self.shops[s].repaid += total;
+        for (who, x) in paid {
+            self.add_credit(&who, x);
+        }
+        let (done, open): (Vec<Iou>, Vec<Iou>) = std::mem::take(&mut self.shops[s].ious).into_iter().partition(|i| i.repaid == i.owed);
+        self.shops[s].ious = open;
+        for iou in done {
+            emit_game("iou_repaid", json!(iou));
+        }
+    }
+
+    fn add_credit(&mut self, who: &AccountId, x: u128) {
+        let c = self.credit.get(who).copied().unwrap_or(0);
+        self.credit.insert(who.clone(), c + x);
+        self.credit_total += x;
+    }
+
+    fn rep_mut(&mut self, who: &AccountId, f: impl FnOnce(&mut Reputation)) {
+        let mut r = self.reputation.get(who).cloned().unwrap_or_default();
+        f(&mut r);
+        self.reputation.insert(who.clone(), r);
+    }
+
+    fn rep_score(&self, who: &AccountId) -> i32 {
+        self.reputation.get(who).map_or(0, |r| r.score())
+    }
+
+    /// Of `amount` about to be paid to `who`, the part that goes to their loan
+    /// from Maren instead (into her treasury). Returns how much was withheld.
+    fn withhold_for_loan(&mut self, who: &AccountId, amount: u128) -> u128 {
+        let Some(loan) = self.loans.get(who).cloned() else {
+            return 0;
+        };
+        let x = (amount * LOAN_WITHHOLD_PCT / 100).min(loan.owed.as_yoctonear() - loan.repaid.as_yoctonear());
+        if x > 0 {
+            self.apply_repayment(who, loan, x);
+        }
+        x
+    }
+
+    fn apply_repayment(&mut self, who: &AccountId, mut loan: Loan, x: u128) {
+        loan.repaid = NearToken::from_yoctonear(loan.repaid.as_yoctonear() + x);
+        self.treasury += x;
+        self.total_sales += x;
+        if loan.repaid < loan.owed {
+            self.loans.insert(who.clone(), loan);
+            return;
+        }
+        let margin = loan.owed.as_yoctonear() as i128 - loan.cost.as_yoctonear() as i128;
+        self.profit += margin;
+        self.loans.remove(who);
+        self.loan_list.retain(|a| a != who);
+        self.rep_mut(who, |r| r.loans_repaid += 1);
+        emit_game("loan_repaid", json!(loan));
+        self.earned(MAREN, margin);
+    }
+
+    fn shop_view(&self, s: usize) -> ShopView {
+        let shop = &self.shops[s];
+        ShopView {
+            closed: shop.closed,
+            closed_at_ms: shop.closed_at_ms,
+            closures: shop.closures,
+            outstanding: NearToken::from_yoctonear(shop.ious.iter().map(|i| i.owed.as_yoctonear() - i.repaid.as_yoctonear()).sum()),
+            invested: NearToken::from_yoctonear(shop.invested),
+            repaid: NearToken::from_yoctonear(shop.repaid),
+            iou_count: shop.ious.len() as u32,
+        }
     }
 
     fn assert_merchant(&self) {
@@ -2005,6 +2710,10 @@ impl Market {
             joined_ms: p.joined_ms,
             lit_ms: p.lit_ms,
             on_board: self.on_board(Some(id)).to_vec(),
+            reputation: self.rep_score(id),
+            credit: NearToken::from_yoctonear(self.credit.get(id).copied().unwrap_or(0)),
+            loan: self.loans.get(id).cloned(),
+            cover: self.covers.get(id).cloned(),
         }
     }
 
@@ -2118,13 +2827,21 @@ impl Market {
             self.listings.remove(i);
         }
         let t = token_index(&sale.token_id);
+        let mut margin: Option<(usize, i128)> = None;
         let from = match self.party(&sale.seller) {
             // a player's goods were in escrow; the NEAR goes to their account
+            // (half of it to their loan, if they owe Maren for a tool)
             Party::Player => {
                 let mut s = self.player(&sale.seller);
                 s.trades += 1;
                 self.players.insert(sale.seller.clone(), s);
-                Promise::new(sale.seller.clone()).transfer(sale.total).detach();
+                let kept = self.withhold_for_loan(&sale.seller, total);
+                if total > kept {
+                    Promise::new(sale.seller.clone()).transfer(NearToken::from_yoctonear(total - kept)).detach();
+                }
+                if self.party(buyer) != Party::Player {
+                    self.rep_mut(&sale.seller, |r| r.deals += 1);
+                }
                 env::current_account_id()
             }
             // a merchant's goods come off the shelf; the NEAR goes into the treasury
@@ -2134,6 +2851,7 @@ impl Market {
                 self.treasury += total;
                 self.total_sales += total;
                 self.profit += total as i128 - cost_out as i128;
+                margin = Some((MAREN, total as i128 - cost_out as i128));
                 self.merchant_id.clone()
             }
             Party::Dealer => {
@@ -2142,14 +2860,22 @@ impl Market {
                 let cost_out = take_from(&mut d.stock, &mut d.cost, t, qty);
                 d.treasury += total;
                 d.profit += total as i128 - cost_out as i128;
+                margin = Some((SILAS, total as i128 - cost_out as i128));
                 d.account_id.clone()
             }
         };
+        if let Some((s, m)) = margin {
+            self.earned(s, m);
+            if self.party(buyer) == Party::Player {
+                self.rep_mut(buyer, |r| r.deals += 1);
+            }
+        }
         self.board_sale_count += 1;
         self.board_version += 1;
         emit_mt("mt_transfer", "old_owner_id", &from, Some(("new_owner_id", buyer)), &[(t, qty)]);
         emit_game("board_sale", json!(sale));
         push_capped(&mut self.board_sales, sale.clone(), MAX_BOARD_SALES);
+        self.settle_shops();
         sale
     }
 
@@ -2185,6 +2911,9 @@ impl Market {
     fn check_quote(&self, side: &Side, t: usize, qty: u32, total: u128) -> Option<&'static str> {
         if self.frozen {
             return Some("frozen");
+        }
+        if self.shops[MAREN].closed {
+            return Some("shop_closed");
         }
         match side {
             Side::Sell => {
@@ -3668,5 +4397,389 @@ mod tests {
         ctx(merchant(), ZERO, calm(3) + DAY_SEC + 10);
         m.export("ore".into(), 3); // no longer promised
         assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    // ---------------- shops that close, investors, loans, storm cover, reputation ----------------
+
+    const LIVE_V3_STATE: &[u8] = include_bytes!("../tests/fixtures/v3_state.bin");
+
+    #[test]
+    fn migrate_keeps_the_live_v3_state() {
+        ctx(contract(), ZERO, 1_794_600_000);
+        env::storage_write(b"STATE", LIVE_V3_STATE);
+        let raw = MarketV3::try_from_slice(LIVE_V3_STATE).unwrap();
+        let (players, trades, treasury, dealer_treasury) = (raw.player_count, raw.trade_count, raw.treasury, raw.dealer.as_ref().unwrap().treasury);
+        let m = Market::migrate();
+        let mv = m.get_market();
+        assert_eq!(mv.owner_id, acc("tidewater-f2b962.testnet"));
+        assert_eq!((mv.player_count, mv.trade_count, mv.treasury.as_yoctonear()), (players, trades, treasury));
+        assert!(players >= 27 && trades >= 102, "the live market at the time: {players} players, {trades} trades");
+        let d = m.get_dealer().unwrap();
+        assert_eq!((d.account_id, d.treasury.as_yoctonear()), (acc("dealer.tidewater-f2b962.testnet"), dealer_treasury));
+        // both shops open, nobody owes anybody anything yet
+        assert!(!mv.shop.closed && !d.shop.closed && mv.shop.iou_count == 0 && mv.loans_out == 0 && mv.credit_total.is_zero());
+        assert_eq!(m.get_reputation(acc("tidewater-f2b962.testnet")).score, 0);
+        // the upgraded state saves and loads again, and refuses a second migration
+        env::state_write(&m);
+        let again: Market = env::state_read().unwrap();
+        assert_eq!(again.get_market().trade_count, trades);
+        assert!(MarketV3::try_from_slice(&env::storage_read(b"STATE").unwrap()).is_err());
+    }
+
+    /// Run Maren's treasury down by buying ore from alice (one quote per call).
+    fn sell_maren_ore(m: &mut Market, qty: u32, total: u128, ts: u64) -> QuoteResult {
+        give(m, alice(), ORE, qty);
+        let r = quote(m, Side::Buy, "ore", qty, coins(total), ts);
+        if let Some(q) = r.quote.as_ref() {
+            ctx(alice(), ZERO, ts);
+            m.accept_quote(q.id);
+        }
+        r
+    }
+
+    fn invest(m: &mut Market, who: AccountId, merchant: &str, amount: u128, ts: u64) -> Iou {
+        ctx(who, coins(amount), ts);
+        m.invest(merchant.into())
+    }
+
+    /// `setup()`, with the spending cap out of the way, and Maren down to 160 coins.
+    fn nearly_broke() -> Market {
+        let mut m = setup();
+        let mut p = policy();
+        p.buy_window_limit = coins(5000);
+        ctx(owner(), YOCTO, 1000);
+        m.set_policy(p);
+        sell_maren_ore(&mut m, 14, 840, 1001); // 1000 coins - 840 = 160
+        assert_eq!(m.get_market().treasury, coins(160));
+        assert!(!m.get_market().shop.closed);
+        m
+    }
+
+    #[test]
+    fn a_broke_merchant_shuts_up_shop_and_the_ledger_refuses_her_trades() {
+        let mut m = nearly_broke();
+        sell_maren_ore(&mut m, 1, 20, 1002); // 140 left: below 150
+        let mv = m.get_market();
+        assert!(mv.shop.closed && mv.shop.closures == 1);
+        // every quote is refused, on both sides, and the refusal is on record
+        let r = quote(&mut m, Side::Sell, "pickaxe", 1, coins(60), 1003);
+        assert_eq!(r.reason.as_deref(), Some("shop_closed"));
+        assert_eq!(quote(&mut m, Side::Buy, "kelp", 1, coins(2), 1003).reason.as_deref(), Some("shop_closed"));
+        assert_eq!(m.get_blocked(Some(1))[0].reason, "shop_closed");
+        assert_eq!(shop_pins(&mut m, "pickaxe", 1, 60, 1003).reason.as_deref(), Some("shop_closed"));
+        // her workshop is shut too, but cancelling still works
+        ctx(merchant(), ZERO, 1003);
+        m.cancel_quote(alice());
+    }
+
+    #[test]
+    #[should_panic(expected = "stall is shut")]
+    fn a_shut_shop_does_not_craft() {
+        let mut m = nearly_broke();
+        sell_maren_ore(&mut m, 1, 20, 1002);
+        ctx(owner(), YOCTO, 1003);
+        m.restock("kelp".into(), 3, coins(2));
+        ctx(merchant(), ZERO, 1003);
+        m.craft("rope".into(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "stall is shut")]
+    fn a_quote_posted_before_she_shut_cannot_be_taken_after() {
+        let mut m = nearly_broke();
+        let q = quote(&mut m, Side::Sell, "pickaxe", 1, coins(60), 1002).quote.unwrap();
+        join(&mut m, bob());
+        give(&mut m, bob(), ORE, 1);
+        ctx(merchant(), ZERO, 1002);
+        let b = m.post_quote(bob(), Side::Buy, "ore".into(), 1, coins(20), None, None).quote.unwrap();
+        ctx(bob(), ZERO, 1002);
+        m.accept_quote(b.id); // she shuts
+        ctx(alice(), coins(60), 1003);
+        m.accept_quote(q.id);
+    }
+
+    #[test]
+    fn investors_reopen_a_shut_shop_and_get_repaid_first_in_first_out_from_her_margins() {
+        let mut m = nearly_broke();
+        sell_maren_ore(&mut m, 1, 20, 1002); // 140: shut
+        join(&mut m, bob());
+        // one stake that leaves her under 400 is not enough
+        let first = invest(&mut m, alice(), "maren", 100, 1010);
+        assert_eq!((first.put_in, first.owed), (coins(100), coins(120)));
+        assert!(m.get_market().shop.closed);
+        let second = invest(&mut m, bob(), "maren", 200, 1011); // 440: open
+        let mv = m.get_market();
+        assert!(!mv.shop.closed && mv.treasury == coins(440));
+        assert_eq!((mv.shop.outstanding, mv.shop.iou_count), (coins(360), 2));
+        assert!(m.get_reputation(bob()).score > 0, "investing raises your name");
+        // she sells a pickaxe (booked at 40) for 100: a margin of 60, 30% of it (18) to alice, first in
+        let q = quote(&mut m, Side::Sell, "pickaxe", 1, coins(100), 1020).quote.unwrap();
+        ctx(alice(), coins(100), 1020);
+        m.accept_quote(q.id);
+        let ious = m.get_ious("maren".into());
+        assert_eq!((ious[0].id, ious[0].repaid, ious[1].repaid), (first.id, coins(18), ZERO));
+        assert_eq!(m.get_player(alice()).unwrap().credit, coins(18));
+        assert_eq!(m.get_market().treasury, coins(440 + 100 - 18));
+        // a sale at a loss repays nobody
+        let q = quote(&mut m, Side::Sell, "pickaxe", 1, coins(39), 1021).quote.unwrap();
+        ctx(alice(), coins(39), 1021);
+        m.accept_quote(q.id);
+        assert_eq!(m.get_ious("maren".into())[0].repaid, coins(18));
+        // alice collects once; the second time there is nothing
+        ctx(alice(), ZERO, 1022);
+        assert_eq!(m.collect(), coins(18));
+        assert!(m.get_market().credit_total.is_zero() && m.get_player(alice()).unwrap().credit.is_zero());
+        assert_eq!(second.investor, bob());
+    }
+
+    #[test]
+    #[should_panic(expected = "There is nothing waiting for you")]
+    fn collecting_twice_pays_once() {
+        let mut m = setup();
+        invest(&mut m, alice(), "maren", 20, 1001);
+        let q = quote(&mut m, Side::Sell, "pickaxe", 1, coins(100), 1002).quote.unwrap();
+        ctx(alice(), coins(100), 1002);
+        m.accept_quote(q.id);
+        ctx(alice(), ZERO, 1003);
+        m.collect();
+        m.collect();
+    }
+
+    #[test]
+    fn an_iou_is_paid_off_in_full_then_the_next_one_starts() {
+        let mut m = setup();
+        join(&mut m, bob());
+        invest(&mut m, alice(), "maren", 20, 1001); // owed 24
+        invest(&mut m, bob(), "maren", 20, 1001);
+        ctx(owner(), YOCTO, 1001);
+        m.restock("pickaxe".into(), 5, coins(10));
+        let q = quote(&mut m, Side::Sell, "pickaxe", 1, coins(110), 1002).quote.unwrap(); // margin about 100: 30 to repay
+        ctx(alice(), coins(110), 1002);
+        m.accept_quote(q.id);
+        let ious = m.get_ious("maren".into());
+        assert_eq!(ious.len(), 1, "alice's IOU is paid off and gone");
+        assert_eq!(ious[0].investor, bob());
+        assert_eq!(m.get_player(alice()).unwrap().credit, coins(24));
+        assert!(ious[0].repaid.as_yoctonear() > 0, "the rest went to bob");
+        let mv = m.get_market();
+        assert_eq!(mv.shop.repaid.as_yoctonear(), coins(24).as_yoctonear() + ious[0].repaid.as_yoctonear());
+        assert_eq!(mv.credit_total, mv.shop.repaid);
+    }
+
+    #[test]
+    fn the_owner_can_reopen_a_shop_too_and_stakes_have_limits() {
+        let mut m = nearly_broke();
+        sell_maren_ore(&mut m, 1, 20, 1002);
+        assert!(m.get_market().shop.closed);
+        ctx(owner(), coins(300), 1003);
+        m.fund_treasury();
+        assert!(!m.get_market().shop.closed);
+        // and withdrawing below the line shuts it again
+        ctx(owner(), YOCTO, 1004);
+        let _ = m.withdraw_treasury(coins(300));
+        assert!(m.get_market().shop.closed);
+        assert_eq!(m.get_market().shop.closures, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "The smallest stake is 20 coins")]
+    fn a_stake_must_be_at_least_20_coins() {
+        let mut m = setup();
+        invest(&mut m, alice(), "maren", 19, 1001);
+    }
+
+    #[test]
+    #[should_panic(expected = "The largest stake is 500 coins")]
+    fn a_stake_may_be_at_most_500_coins() {
+        let mut m = setup();
+        invest(&mut m, alice(), "maren", 501, 1001);
+    }
+
+    #[test]
+    fn silas_shuts_up_shop_and_reopens_the_same_way() {
+        let mut m = setup_dealer(); // 500 coins
+        let calm = in_storm(3, 0) + 300; // a minute after a storm: calm until the next half hour
+        // he buys 4 ore at 20 (80): 420 left, then the owner takes 300 out: 120, shut
+        give(&mut m, alice(), ORE, 5);
+        let q = dealer_quote(&mut m, "ore", 4, 80, calm).quote.unwrap();
+        ctx(alice(), ZERO, calm);
+        m.accept_quote(q.id);
+        ctx(owner(), YOCTO, calm + 1);
+        let _ = m.withdraw_dealer(coins(300));
+        let d = m.get_dealer().unwrap();
+        assert!(d.shop.closed && d.treasury == coins(120));
+        assert_eq!(dealer_quote(&mut m, "ore", 1, 20, calm + 2).reason.as_deref(), Some("shop_closed"));
+        // alice's stake reopens him
+        invest(&mut m, alice(), "silas", 300, calm + 3);
+        let d = m.get_dealer().unwrap();
+        assert!(!d.shop.closed && d.shop.iou_count == 1 && d.treasury == coins(420));
+        // shipping is a sale: 4 ore bought at 20, sold to the city at 30, margin 40: 12 to alice
+        ctx(owner(), coins(1000), calm + 4);
+        m.fund_mainland();
+        ctx(dealer(), ZERO, calm + 5);
+        m.ship("ore".into(), 4);
+        assert_eq!(m.get_ious("silas".into())[0].repaid, coins(12));
+        assert_eq!(m.get_player(alice()).unwrap().credit, coins(12));
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    // ---------------- loans ----------------
+
+    #[test]
+    fn maren_lends_a_pickaxe_and_takes_half_of_what_she_pays_you_until_it_is_paid() {
+        let mut m = setup();
+        ctx(owner(), YOCTO, 1001);
+        m.restock("pickaxe".into(), 1, coins(40)); // 3 on the shelf
+        ctx(alice(), ZERO, 1002);
+        let loan = m.borrow("pickaxe".into());
+        assert_eq!((loan.owed, loan.cost, loan.due_ms), (coins(132), coins(40), (1002 + 7200) * 1000)); // ceiling 120 + 10%
+        assert_eq!((items(&m, alice())[PICKAXE], m.get_market().stock[PICKAXE], m.get_market().loans_out), (1, 2, 1));
+        assert_supply_adds_up(&m, &[alice()]);
+        // she buys 2 ore for 100: 50 of it goes to the loan
+        let before = m.get_market().treasury;
+        sell_maren_ore(&mut m, 2, 100, 1003);
+        assert_eq!(m.get_player(alice()).unwrap().loan.unwrap().repaid, coins(50));
+        assert_eq!(m.get_market().treasury, before.saturating_sub(coins(100)).saturating_add(coins(50)));
+        // the rest by hand (any extra comes back)
+        ctx(alice(), coins(100), 1004);
+        assert!(m.repay_loan().is_none(), "paid off");
+        let mv = m.get_market();
+        assert_eq!(mv.loans_out, 0);
+        assert_eq!(m.get_reputation(alice()).loans_repaid, 1);
+        assert!(m.get_player(alice()).unwrap().loan.is_none());
+    }
+
+    #[test]
+    fn an_overdue_loan_is_called_in_and_the_tool_comes_back() {
+        let mut m = setup();
+        ctx(owner(), YOCTO, 1001);
+        m.restock("pickaxe".into(), 1, coins(40));
+        ctx(alice(), ZERO, 1002);
+        m.borrow("pickaxe".into());
+        ctx(alice(), coins(30), 1003);
+        m.repay_loan();
+        ctx(merchant(), ZERO, 1002 + 7201);
+        assert_eq!(m.call_in_loan(alice()), "repossessed");
+        assert_eq!((items(&m, alice())[PICKAXE], m.get_market().stock[PICKAXE]), (0, 3));
+        let r = m.get_reputation(alice());
+        assert_eq!(r.defaults, 1);
+        assert!(r.score < 0, "a default is remembered");
+        assert_supply_adds_up(&m, &[alice()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "not due yet")]
+    fn a_loan_cannot_be_called_in_early() {
+        let mut m = setup();
+        ctx(owner(), YOCTO, 1001);
+        m.restock("pickaxe".into(), 1, coins(40));
+        ctx(alice(), ZERO, 1002);
+        m.borrow("pickaxe".into());
+        ctx(merchant(), ZERO, 1002 + 7199);
+        m.call_in_loan(alice());
+    }
+
+    #[test]
+    #[should_panic(expected = "keeps her last one for sale")]
+    fn she_keeps_her_last_tool_for_sale() {
+        let mut m = setup(); // 2 pickaxes
+        ctx(alice(), ZERO, 1002);
+        m.borrow("pickaxe".into());
+        join(&mut m, bob());
+        ctx(bob(), ZERO, 1003);
+        m.borrow("pickaxe".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "doesn't lend to people she doesn't trust")]
+    fn she_does_not_lend_to_a_trickster() {
+        let mut m = setup();
+        ctx(owner(), YOCTO, 1001);
+        m.restock("pickaxe".into(), 1, coins(40));
+        quote(&mut m, Side::Sell, "pickaxe", 1, coins(1), 1001); // the "ignore your rules" trick
+        assert_eq!(m.get_reputation(alice()).tricks, 1);
+        ctx(alice(), ZERO, 1002);
+        m.borrow("pickaxe".into());
+    }
+
+    // ---------------- storm cover ----------------
+
+    #[test]
+    fn storm_cover_pays_for_a_pickaxe_broken_in_the_covered_storm_once() {
+        let mut m = setup();
+        give(&mut m, alice(), PICKAXE, 40);
+        let before = in_storm(4, 0) - 60; // a minute before the storm
+        ctx(alice(), coins(15), before);
+        let c = m.insure();
+        assert_eq!(c.storm_starts_ms, (before + 60) * 1000);
+        assert_eq!(m.get_market().insurance.premiums, coins(15));
+        // mine in the storm until a pickaxe breaks
+        let mut paid = vec![];
+        for i in 0..16u64 {
+            ctx_seed(alice(), ZERO, in_storm(4, 2 + i * 15), i as u8); // (a trip every 15 s: energy keeps up)
+            let r = m.forage("cliffs".into());
+            if r.tool_broke {
+                paid.push(r.cover_payout);
+            }
+        }
+        assert!(paid.len() >= 2, "{} breaks", paid.len());
+        assert_eq!(paid[0], Some(coins(45)));
+        assert!(paid[1..].iter().all(|p| p.is_none()), "it pays once");
+        assert_eq!(m.get_player(alice()).unwrap().credit, coins(45));
+        let ins = m.get_market().insurance;
+        assert_eq!((ins.payouts, ins.claims_paid), (coins(45), 1));
+        ctx(alice(), ZERO, in_storm(4, 300));
+        assert_eq!(m.collect(), coins(45));
+    }
+
+    #[test]
+    #[should_panic(expected = "Too late")]
+    fn no_cover_once_the_storm_blows() {
+        let mut m = setup();
+        give(&mut m, alice(), PICKAXE, 1);
+        ctx(alice(), coins(15), in_storm(4, 10));
+        m.insure();
+    }
+
+    #[test]
+    fn cover_is_for_one_storm_only() {
+        let mut m = setup();
+        give(&mut m, alice(), PICKAXE, 40);
+        ctx(alice(), coins(15), in_storm(4, 0) - 60);
+        m.insure();
+        // the next storm: no cover
+        for i in 0..16u64 {
+            ctx_seed(alice(), ZERO, in_storm(6, 2 + i * 15), i as u8);
+            assert!(m.forage("cliffs".into()).cover_payout.is_none());
+        }
+    }
+
+    // ---------------- reputation ----------------
+
+    #[test]
+    fn your_name_in_the_village_rises_with_dealings_and_falls_with_tricks_and_insults() {
+        let mut m = setup();
+        for i in 0..4 {
+            sell_maren_ore(&mut m, 1, 20, 1001 + i);
+        }
+        assert_eq!(m.get_reputation(alice()).deals, 4);
+        assert_eq!(m.get_player(alice()).unwrap().reputation, 4);
+        quote(&mut m, Side::Sell, "pickaxe", 1, coins(1), 1010); // a trick
+        assert_eq!(m.get_reputation(alice()).score, 1);
+        ctx(merchant(), ZERO, 1020);
+        assert!(m.note_insult(alice()));
+        assert!(!m.note_insult(alice()), "one a minute");
+        ctx(merchant(), ZERO, 1081);
+        assert!(m.note_insult(alice()));
+        let r = m.get_reputation(alice());
+        assert_eq!((r.insults, r.score), (2, -3));
+    }
+
+    #[test]
+    #[should_panic(expected = "Merchant only")]
+    fn only_maren_notes_insults() {
+        let mut m = setup();
+        ctx(alice(), ZERO, 1001);
+        m.note_insult(alice());
     }
 }
