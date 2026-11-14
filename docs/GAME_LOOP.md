@@ -145,4 +145,4 @@ The market keeps moving whether or not you are at the stall:
 
 These are on the plan and are **not** in the game today:
 
-- **Sign in with Google**, so your stall follows you to another device.
+- **Sign in with Google** is built, and switched on once the server has a Google client ID (`scripts/add-login.sh`); until then everyone plays as a guest.

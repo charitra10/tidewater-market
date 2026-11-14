@@ -531,6 +531,26 @@ const m = await api("/api/market");
 console.log(`\n▸ Maren's books: treasury ${m.treasury} coins, profit so far ${m.profit} coins`);
 for (const n of m.news) console.log(`  news: ${n.text}`);
 
+// Signing in brings a guest's bag across in one transaction (mt_batch_transfer,
+// as the game does when a guest signs in with Google): the neighbour's to me.
+console.log(`\n▸ Bringing a bag across, as when a guest signs in`);
+{
+  const theirs = (await near.view(cfg.contract, "get_player", { account_id: neighbour })).items;
+  const ids = TOK.filter((t, i) => theirs[i] > 0);
+  if (!ids.length) console.log("  (the neighbour's bag is empty)");
+  else {
+    const before = (await player()).items;
+    await ncall("mt_batch_transfer", { receiver_id: me, token_ids: ids, amounts: ids.map((t) => String(theirs[TOK.indexOf(t)])) }, 1n);
+    let after = before;
+    for (let i = 0; i < 15 && after.every((n, j) => n === before[j]); i++) {
+      await sleep(1000);
+      after = (await player()).items;
+    }
+    const left = (await near.view(cfg.contract, "get_player", { account_id: neighbour })).items;
+    check(ids.every((t) => after[TOK.indexOf(t)] === before[TOK.indexOf(t)] + theirs[TOK.indexOf(t)]) && left.every((n) => n === 0), `the neighbour's whole bag came to me in one transaction (${ids.map((t) => `${theirs[TOK.indexOf(t)]} ${t}`).join(", ")})`);
+  }
+}
+
 // Hand the guest accounts back: close them, and what is left in them goes to
 // the guest fund that paid for them (their items and stats stay in the contract).
 if (!KEEP) {

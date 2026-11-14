@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { Near, loadKey, actions, b58decode, TGAS, YOCTO_PER_COIN, yoctoToCoins, ChainError } from "../web/near-lite.js";
 import { TOKENS, RAW, WARES, TARGET, RECIPES, VALUE, priceBoard, unitBid, planWork, boardPicks, openHaggle, haggle, readIntent, MOODS, DEALER_TOKENS, DEALER_HOLD, dealerBid, dealerBoard, openDealerHaggle, shipPlan, marenNotices, silasNotices, dealerPicks, promisedBy, staleNotices, haggleWhy, recentDemand, repMood, TERMS, OVERFLOW, mainlandShare, orderPlan, staleOrders, orderWhy, auctionPlan, leastFor, offerAnswer, SHOP_KINDS, clerkWhy, clerkLeast, clerkShouldReprice, clerkNote } from "../web/merchant.js";
 import { say, writtenLine, initVoice, lot, TIDE_WHY } from "./voice.js";
+import { verifyIdToken, googleKeys, accountFor } from "./login.js";
 import { tideAt, tideBidFactor, stormAt, stormBidFactor, eventAt } from "../web/tide.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -57,6 +58,14 @@ const dealerKey = process.env.DEALER_KEY ? await loadKey(process.env.DEALER_KEY)
 const CLERK_ID = process.env.CLERK_ID || null;
 const clerkKey = process.env.CLERK_KEY ? await loadKey(process.env.CLERK_KEY) : null;
 const sponsorKey = await loadKey(need("SPONSOR_KEY"));
+// Sign in with Google is optional (scripts/add-login.sh): the public client id,
+// the secret that turns a Google id into an account name, and the recovery key
+// that lets the same person add a new device's key (custodial, testnet only).
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || null;
+const LOGIN_SECRET = process.env.LOGIN_SECRET || null;
+const recoveryKey = process.env.RECOVERY_KEY ? await loadKey(process.env.RECOVERY_KEY) : null;
+const loginReady = Boolean(GOOGLE_CLIENT_ID && LOGIN_SECRET && recoveryKey);
+const googleKeyFor = googleKeys();
 const voice = await initVoice();
 
 const coinsToYoctoStr = (coins) => (BigInt(coins) * YOCTO_PER_COIN).toString();
@@ -609,8 +618,9 @@ function whoName(account) {
   if (account === MERCHANT_ID) return "Maren";
   if (account === DEALER_ID) return "Silas";
   if (account === CLERK_ID) return "the clerk";
-  const g = account.match(/^g([0-9a-f]{4})[0-9a-f]*\./);
-  return g ? `Guest ${g[1]}` : account.split(".")[0];
+  // guests are "Guest 7f1f"; players who signed in with Google, "Player 2c9a"
+  const g = account.match(/^([gu])([0-9a-f]{4})[0-9a-f]*\./);
+  return g ? `${g[1] === "g" ? "Guest" : "Player"} ${g[2]}` : account.split(".")[0];
 }
 
 // ---------- players Maren remembers (in memory only) ----------
@@ -805,7 +815,7 @@ async function trick(player, me, market, reply, who = "maren") {
 
 // ---------- guests ----------
 const guestLog = new Map(); // ip -> [timestamps]
-async function createGuest(body, ip) {
+function publicKeyOf(body) {
   const publicKey = String(body.publicKey || "");
   let raw;
   try {
@@ -814,6 +824,11 @@ async function createGuest(body, ip) {
     raw = [];
   }
   if (!publicKey.startsWith("ed25519:") || raw.length !== 32) throw httpError(400, "Bad public key");
+  return publicKey;
+}
+
+async function createGuest(body, ip) {
+  const publicKey = publicKeyOf(body);
   const recent = (guestLog.get(ip) ?? []).filter((t) => Date.now() - t < 3600_000);
   if (recent.length >= MAX_GUESTS_PER_HOUR) throw httpError(429, "Too many new players from here. Try again in an hour.");
   const yocto = BigInt(Math.round(GUEST_NEAR * 1000)) * 10n ** 21n;
@@ -825,6 +840,45 @@ async function createGuest(body, ip) {
   lastActivity = Date.now();
   console.log("  · new guest", accountId);
   return { accountId };
+}
+
+/// Sign in with Google: the account for this person (made on first sign-in,
+/// with this device's key and the recovery key), and this device's key added
+/// to it if it isn't there yet. Only Google's id for the person is used; no email is kept.
+const loginLog = new Map(); // ip or google id -> times
+function limited(k, max) {
+  const recent = (loginLog.get(k) ?? []).filter((t) => Date.now() - t < 3600_000);
+  if (recent.length >= max) return true;
+  recent.push(Date.now());
+  loginLog.set(k, recent);
+  return false;
+}
+async function login(body, ip) {
+  if (!loginReady) throw httpError(503, "Signing in isn't set up on this server yet.");
+  const publicKey = publicKeyOf(body);
+  if (limited(`ip:${ip}`, 30)) throw httpError(429, "Too many sign-ins from here. Try again in an hour.");
+  let sub;
+  try {
+    ({ sub } = await verifyIdToken(body.credential, { clientId: GOOGLE_CLIENT_ID, keyFor: googleKeyFor }));
+  } catch (e) {
+    throw httpError(401, `Google sign-in didn't check out: ${e.message}.`);
+  }
+  if (limited(`sub:${sub}`, 10)) throw httpError(429, "Too many sign-ins for this account. Try again in an hour.");
+  const accountId = accountFor(sub, LOGIN_SECRET, SPONSOR_ID);
+  lastActivity = Date.now();
+  if (!(await near.accountExists(accountId))) {
+    const yocto = BigInt(Math.round(GUEST_NEAR * 1000)) * 10n ** 21n;
+    if ((await near.balance(SPONSOR_ID)) < yocto + 10n ** 23n) throw httpError(503, "The harbour is full: the guest fund has run dry.");
+    await near.send(SPONSOR_ID, sponsorKey, accountId, [actions.createAccount(), actions.transfer(yocto), actions.addFullAccessKey(publicKey), actions.addFullAccessKey(recoveryKey.publicKey)]);
+    console.log("  · new signed-in player", accountId);
+    return { accountId, created: true };
+  }
+  // a new device: add its key with the recovery key (NEAR's function-call keys can't attach deposits, so it is full access)
+  const has = await near
+    .rpc("query", { request_type: "view_access_key", finality: "final", account_id: accountId, public_key: publicKey })
+    .then(() => true, () => false);
+  if (!has) await near.send(accountId, recoveryKey, accountId, [actions.addFullAccessKey(publicKey)]);
+  return { accountId, created: false };
 }
 
 // ---------- http ----------
@@ -855,7 +909,7 @@ async function route(req, res) {
   };
   try {
     if (url.pathname === "/api/config") {
-      return send(200, { network: "testnet", contract: CONTRACT, merchantId: MERCHANT_ID, dealerId: DEALER_ID, clerkId: CLERK_ID, rpcUrls: RPC_URLS, guestNear: GUEST_NEAR, explorer: "https://testnet.nearblocks.io", voice });
+      return send(200, { network: "testnet", contract: CONTRACT, merchantId: MERCHANT_ID, dealerId: DEALER_ID, clerkId: CLERK_ID, googleClientId: loginReady ? GOOGLE_CLIENT_ID : null, rpcUrls: RPC_URLS, guestNear: GUEST_NEAR, explorer: "https://testnet.nearblocks.io", voice });
     }
     if (url.pathname === "/api/market") {
       const market = await getMarket(url.searchParams.has("fresh")); // "fresh": right after the player changed something
@@ -937,6 +991,9 @@ async function route(req, res) {
         now: Date.now(),
       });
     }
+    if (url.pathname === "/api/login" && req.method === "POST") {
+      return send(200, await login(await readJson(req), req.socket.remoteAddress));
+    }
     if (url.pathname === "/api/guest" && req.method === "POST") {
       return send(200, await createGuest(await readJson(req), req.socket.remoteAddress));
     }
@@ -966,4 +1023,5 @@ http.createServer(route).listen(PORT, () => {
   console.log(`  merchant  ${MERCHANT_ID}  (her key can only quote, craft, export, trade on the notice board, note insults, call in loans, post orders, run auctions and answer offers)`);
   if (DEALER_ID) console.log(`  dealer    ${DEALER_ID}  (Silas: his key can only quote, ship, trade on the notice board and answer offers)`);
   console.log(`  voice     ${voice === "claude" ? "Claude writes Maren's lines" : "written lines (set ANTHROPIC_API_KEY for Claude)"}`);
+  console.log(`  sign-in   ${loginReady ? "Google sign-in is on" : "guests only (./scripts/add-login.sh <Google client id> turns on Google sign-in)"}`);
 });

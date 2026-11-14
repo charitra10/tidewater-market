@@ -204,8 +204,9 @@ function who(account) {
   if (mine(account)) return "You";
   if (cfg && account === cfg.merchantId) return "Maren";
   if (cfg && account === cfg.dealerId) return "Silas";
-  const g = account.match(/^g([0-9a-f]{4})[0-9a-f]*\./);
-  return g ? `Guest ${g[1]}` : account.split(".")[0];
+  // guests are "Guest 7f1f"; players who signed in with Google, "Player 2c9a"
+  const g = account.match(/^([gu])([0-9a-f]{4})[0-9a-f]*\./);
+  return g ? `${g[1] === "g" ? "Guest" : "Player"} ${g[2]}` : account.split(".")[0];
 }
 const noticeOf = (seller) => (mine(seller) ? "your notice" : `${who(seller)}'s notice`);
 const MANY = { kelp: "kelp", driftwood: "driftwood", ore: "ore", pearl: "pearls", rope: "rope", pickaxe: "pickaxes", boat: "boats", beacon: "beacon lenses" };
@@ -2238,6 +2239,76 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+// ---------- sign in with Google (when the server has it set up) ----------
+// The server checks Google's token and gives back an account of your own, the
+// same on every device; this device gets a fresh key for it. A guest who signs
+// in brings their bag across, and the guest account is closed into the new one.
+function setupGoogle() {
+  if (!cfg?.googleClientId || save?.google) return;
+  const s = document.createElement("script");
+  s.src = "https://accounts.google.com/gsi/client";
+  s.async = true;
+  s.onload = () => {
+    google.accounts.id.initialize({ client_id: cfg.googleClientId, callback: (r) => signedIn(r.credential) });
+    google.accounts.id.renderButton($("gsignin"), { theme: "outline", size: "large", text: save ? "signin_with" : "continue_with", shape: "pill" });
+    $("gsignin").hidden = false;
+    $("gnote").hidden = false;
+    $("gnote").textContent = save ? "Sign in to keep your things on any device: your bag comes with you." : "Or sign in with Google to keep your stall on any device.";
+  };
+  document.head.appendChild(s);
+}
+
+async function signedIn(credential) {
+  const note = (t) => ($("start-note").textContent = t);
+  $("start").disabled = true;
+  try {
+    // a guest's notices, coins waiting and loan belong to the guest account: settle them first
+    if (save && !save.google) {
+      const gp = await near.view(cfg.contract, "get_player", { account_id: save.accountId });
+      const open = !gp ? [] : [gp.on_board.some((n) => n > 0) && "take your notices down", BigInt(gp.credit ?? "0") > 0n && "collect what is waiting for you at the stall", gp.loan && "pay off your loan"].filter(Boolean);
+      if (open.length) {
+        $("start").disabled = false;
+        return note(`Before you sign in, ${open.join(", ")}: ${open.length > 1 ? "they belong" : "it belongs"} to your guest account. Your bag comes with you.`);
+      }
+    }
+    note("Checking with Google…");
+    const kp = await generateKey();
+    const { accountId } = await api("/api/login", { credential, publicKey: kp.publicKey });
+    const next = { accountId, secret: kp.secret, contract: cfg.contract, flags: save?.flags ?? {}, google: true };
+    if (save && save.accountId !== accountId && !save.google) {
+      note("Bringing your bag across…");
+      await bringAcross(save, next);
+    }
+    save = next;
+    localStorage.setItem(SAVE, JSON.stringify(save));
+    $("gsignin").hidden = true;
+    $("gnote").hidden = true;
+    $("start").disabled = false;
+    $("start").click();
+  } catch (e) {
+    $("start").disabled = false;
+    note("Signing in didn't work: " + e.message);
+  }
+}
+
+/// Moves a guest's bag to the signed-in account, then closes the guest account
+/// into it (its NEAR comes along).
+async function bringAcross(old, next) {
+  const oldKey = await loadKey(old.secret);
+  const newKey = await loadKey(next.secret);
+  const gp = await near.view(cfg.contract, "get_player", { account_id: old.accountId });
+  if (gp) {
+    // the receiver must have joined
+    await near.send(next.accountId, newKey, cfg.contract, [actions.functionCall("join", {}, 15n * TGAS)]);
+    const ids = TOKENS.filter((t) => gp.items[idx(t)] > 0);
+    if (ids.length) {
+      const args = { receiver_id: next.accountId, token_ids: ids, amounts: ids.map((t) => String(gp.items[idx(t)])) };
+      await near.send(old.accountId, oldKey, cfg.contract, [actions.functionCall("mt_batch_transfer", args, 30n * TGAS, 1n)]);
+    }
+  }
+  await near.send(old.accountId, oldKey, old.accountId, [actions.deleteAccount(next.accountId)]);
+}
+
 // ---------- start ----------
 async function boot() {
   resize();
@@ -2252,6 +2323,7 @@ async function boot() {
       $("start").textContent = "Walk back into the village";
       $("start-note").textContent = "Welcome back. Your things are where you left them.";
     }
+    setupGoogle();
     api("/api/market")
       .then((m) => {
         S.market ??= m;
